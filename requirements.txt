@@ -1,0 +1,12 @@
+# AntiSEL Dashboard v2.0 - Requirements
+# 
+# Python 3.7+ è richiesto
+# Tkinter è incluso nella distribuzione standard Python
+
+# Nessuna dipendenza esterna richiesta.
+# Tutti i moduli utilizzati sono parte della stdlib:
+# - tkinter (GUI)
+# - socket (comunicazione TCP/IP)
+# - threading (multi-threading)
+# - time (timing)
+# - queue (thread-safe queue)
