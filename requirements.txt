@@ -10,3 +10,5 @@
 # - threading (multi-threading)
 # - time (timing)
 # - queue (thread-safe queue)
+
+customtkinter>=5.2.0
