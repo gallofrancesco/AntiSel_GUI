@@ -86,6 +86,55 @@ Errori TX: ...   # Errore
 Timeout          # Timeout connessione
 ```
 
+## 🛡️ Requisiti Sistema AntiSEL (INA301 Latch Mode)
+
+Il sistema implementa una logica di monitoraggio e protezione hardware/software definita dai seguenti requisiti funzionali:
+
+*   **R-01**: Monitoraggio e protezione della corrente di alimentazione del DUT (Device Under Test) mediante un sistema di rilevamento a soglia basato su INA301 in modalità Latch.
+*   **R-02**: Soglia di intervento (`I_TH`) regolabile in funzione delle esigenze del componente, in un range nominale di 1 mA – 50 mA.
+*   **R-03**: Tempo `T_HOLD` (intervallo fra il superamento della soglia e l'apertura dello switch) selezionabile fra 1 ms e 10 ms.
+*   **R-04**: Tempo `T_ON` (intervallo fra l'apertura e la richiusura dello switch) selezionabile fra 1 ms e 10 ms.
+*   **R-05**: Se un evento genera una sovra-corrente che supera la soglia ma rientra entro il `T_HOLD`, l'evento NON deve far scattare il power-cycle e deve essere classificato come HCE (High Current Event).
+*   **R-06**: Il sistema acquisisce e salva la traccia di corrente durante l'intervallo `T_HOLD + T_ON`, sia per gli eventi SEL veri che per gli HCE.
+*   **R-07**: È disponibile un comando manuale ON/OFF per pilotare lo switch indipendentemente dallo stato del DUT (Override).
+*   **R-08**: Viene garantito un log continuo del consumo di corrente con frequenza 10 Hz durante l'intero test per tracciare micro-latchup e current-steps.
+
+### Parametri Operativi
+
+| Parametro | Simbolo | Range | Risoluzione Tipica |
+|-----------|---------|-------|--------------------|
+| Soglia di corrente | `I_TH` | 1 mA – 50 mA | ≤ 0.1 mA (12-bit DAC) |
+| Tempo di hold | `T_HOLD` | 1 ms – 10 ms | ≤ 100 µs |
+| Tempo di OFF (power cycle) | `T_ON` | 1 ms – 10 ms | ≤ 100 µs |
+| Frequenza log lento | `f_log` | 10 Hz (fissa) | ± 1 ms (timestamp) |
+| Tensione alimentazione DUT | `V_DD` | 0 – 6 V (max op.)| Fissata da TPS22810 |
+| Temperatura DUT | `T_DUT` | +85 °C | ± 2 °C |
+
+## 🧪 Test del Sistema (Simulazione Hardware-in-the-loop)
+
+Per testare il sistema senza il setup finale (INA301, TPS22810, e DUT fisico), è possibile effettuare una simulazione usando la STM32Nucleo e la GUI:
+
+1. **Test Connettività e Log 10Hz**
+   - Assicurarsi che l'IP della Nucleo corrisponda ai parametri `HOST` e `PORT` in `antisel_dashboard_eth.py`.
+   - Inviare il comando `PING` dalla GUI e verificare la risposta `PONG`.
+   - Il firmware della Nucleo può essere programmato per inviare periodicamente `LOG_10HZ <dati>`; verificare che la GUI lo mostri nel pannello a destra "Log 10Hz & Tracce".
+
+2. **Test Impostazione Soglie (Output DAC)**
+   - Nel tab **AntiSEL Config**, regolare lo slider `I_TH`. La GUI calcola i counts necessari in base a `R_SHUNT` e al `GAIN`.
+   - La GUI invia `DAC_SET <counts>`.
+   - Con un multimetro, misurare l'uscita analogica del DAC sulla STM32Nucleo per assicurarsi che produca correttamente la `V_LIMIT`.
+   - Impostare `T_HOLD` e `T_ON` per verificare l'invio corretto di `THOLD_SET` e `TON_SET`.
+
+3. **Simulazione Macchina a Stati (SEL vs HCE)**
+   - Collegare un pulsante sul pin di input della Nucleo destinato al segnale `ALARM` dell'INA301.
+   - Monitorare con un oscilloscopio il pin `GPIO_EN` (uscita per il TPS22810).
+   - Simulare un allarme prolungato (più di `T_HOLD`): il `GPIO_EN` deve abbassarsi per un tempo pari a `T_ON` per poi tornare alto (evento SEL).
+   - Simulare un allarme breve (meno di `T_HOLD`): il `GPIO_EN` non deve subire variazioni (evento HCE).
+
+4. **Simulazione Tracce Veloci**
+   - Alla ricezione di un allarme simulato, far inviare alla Nucleo via TCP un pacchetto delimitato da `TRACE_START <tipo_evento>` e `TRACE_END`.
+   - Verificare che la GUI salvi i dati intermedi in un file CSV `trace_YYYYMMDD_HHMMSS.csv` localmente, isolandoli dal log real-time.
+
 ## 🔧 Sviluppo
 
 ### Struttura codice
@@ -97,25 +146,11 @@ Timeout          # Timeout connessione
 - `_ping_loop_thread()`: Thread loop automatico PING
 - `_log()`: Gestione logging con tag colori
 
-### Estensioni possibili
-- Persistenza configurazione (JSON/INI)
-- Export log su file
-- Storico metriche con grafici
-- Multi-device support
-- Implementazione protocollo customizzato
 
-## 📄 Licenza
-
-[Specifica licenza se applicabile]
-
-## 👤 Autore
-
-Sviluppato per il controllo e debug dispositivi AntiSEL.
 
 ## 📞 Support
 
 Per problemi di connessione:
 1. Verificare indirizzo IP e porta
 2. Controllare raggiungibilità dispositivo (ping)
-3. Verificare firewall
-4. Controllare log errori applicazione
+3. Controllare log errori applicazione

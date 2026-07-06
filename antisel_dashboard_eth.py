@@ -47,6 +47,8 @@ class AntiSELDashboard:
         self.btn_ping_loop    = None
         self.wave_active      = False
         self.wave_thread      = None
+        self.trace_active     = False
+        self.trace_file       = None
 
         self._build_ui()
         self.root.after(100, self._poll_rx_queue)
@@ -96,14 +98,17 @@ class AntiSELDashboard:
         tab_log  = tk.Frame(nb, bg="#181825")
         tab_dac  = tk.Frame(nb, bg="#181825")
         tab_wave = tk.Frame(nb, bg="#181825")
+        tab_antisel = tk.Frame(nb, bg="#181825")
 
         nb.add(tab_log,  text=" Log ")
         nb.add(tab_dac,  text=" DAC ")
         nb.add(tab_wave, text=" Generatore ")
+        nb.add(tab_antisel, text=" AntiSEL Config ")
 
         self._build_log_tab(tab_log)
         self._build_dac_tab(tab_dac)
         self._build_wave_tab(tab_wave)
+        self._build_antisel_tab(tab_antisel)
 
         # Barra comandi
         cmd_frame = tk.Frame(self.root, bg="#1e1e2e", pady=6)
@@ -140,21 +145,88 @@ class AntiSELDashboard:
 
     # ---------------------------------------------------------------- Tab Log
     def _build_log_tab(self, parent):
-        tk.Label(parent, text="Log comunicazione",
+        top_frm = tk.Frame(parent, bg="#181825")
+        top_frm.pack(fill=tk.X, padx=8, pady=(4, 0))
+        tk.Label(top_frm, text="Log comunicazione",
                  font=("Courier", 9, "bold"), fg="#6c7086",
-                 bg="#181825").pack(anchor=tk.W, padx=8, pady=(4, 0))
+                 bg="#181825").pack(side=tk.LEFT)
+        tk.Label(top_frm, text="Log 10Hz & Tracce",
+                 font=("Courier", 9, "bold"), fg="#6c7086",
+                 bg="#181825").pack(side=tk.RIGHT)
+
+        log_frm = tk.Frame(parent, bg="#181825")
+        log_frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
 
         self.log = scrolledtext.ScrolledText(
-            parent, font=("Courier", 10),
+            log_frm, font=("Courier", 10),
             bg="#11111b", fg="#cdd6f4",
             insertbackground="#cdd6f4",
             relief=tk.FLAT, state=tk.DISABLED, wrap=tk.WORD)
-        self.log.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+        self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
+        
+        self.slow_log = scrolledtext.ScrolledText(
+            log_frm, font=("Courier", 10),
+            bg="#1e1e2e", fg="#a6e3a1",
+            insertbackground="#cdd6f4",
+            relief=tk.FLAT, state=tk.DISABLED, wrap=tk.WORD)
+        self.slow_log.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(4, 0))
 
         self.log.tag_config("tx",   foreground="#89b4fa")
         self.log.tag_config("rx",   foreground="#a6e3a1")
         self.log.tag_config("info", foreground="#f9e2af")
         self.log.tag_config("err",  foreground="#f38ba8")
+
+    # ---------------------------------------------------------------- Tab AntiSEL
+    def _build_antisel_tab(self, parent):
+        frm = tk.Frame(parent, bg="#181825")
+        frm.pack(expand=True, pady=10)
+
+        # Settings hardware
+        tk.Label(frm, text="Hardware Settings", font=("Courier", 11, "bold"), fg="#cdd6f4", bg="#181825").grid(row=0, column=0, columnspan=3, pady=(0, 10))
+        
+        tk.Label(frm, text="R_SHUNT (Ω):", font=("Courier", 9, "bold"), fg="#6c7086", bg="#181825").grid(row=1, column=0, sticky=tk.E, padx=8)
+        self.entry_rshunt = tk.Entry(frm, font=("Courier", 10), bg="#313244", fg="#cdd6f4", relief=tk.FLAT, width=10)
+        self.entry_rshunt.insert(0, "1.0")
+        self.entry_rshunt.grid(row=1, column=1, sticky=tk.W)
+
+        tk.Label(frm, text="INA301 Gain:", font=("Courier", 9, "bold"), fg="#6c7086", bg="#181825").grid(row=2, column=0, sticky=tk.E, padx=8, pady=4)
+        self.entry_gain = tk.Entry(frm, font=("Courier", 10), bg="#313244", fg="#cdd6f4", relief=tk.FLAT, width=10)
+        self.entry_gain.insert(0, "20")
+        self.entry_gain.grid(row=2, column=1, sticky=tk.W, pady=4)
+
+        # I_TH
+        tk.Label(frm, text="I_TH (1-50 mA):", font=("Courier", 9, "bold"), fg="#6c7086", bg="#181825").grid(row=3, column=0, sticky=tk.E, padx=8, pady=10)
+        self.ith_slider = tk.Scale(frm, from_=1.0, to=50.0, resolution=0.5, orient=tk.HORIZONTAL, length=200, bg="#313244", fg="#cdd6f4", troughcolor="#11111b", highlightthickness=0, command=self._on_ith_change)
+        self.ith_slider.set(10.0)
+        self.ith_slider.grid(row=3, column=1, padx=8)
+        self.lbl_ith_calc = tk.Label(frm, text="DAC: 0", font=("Courier", 9, "bold"), fg="#f9e2af", bg="#181825")
+        self.lbl_ith_calc.grid(row=3, column=2, padx=8)
+
+        # T_HOLD
+        tk.Label(frm, text="T_HOLD (1-10 ms):", font=("Courier", 9, "bold"), fg="#6c7086", bg="#181825").grid(row=4, column=0, sticky=tk.E, padx=8, pady=10)
+        self.thold_slider = tk.Scale(frm, from_=1.0, to=10.0, resolution=0.1, orient=tk.HORIZONTAL, length=200, bg="#313244", fg="#cdd6f4", troughcolor="#11111b", highlightthickness=0)
+        self.thold_slider.set(1.0)
+        self.thold_slider.grid(row=4, column=1, padx=8)
+        tk.Button(frm, text="Set T_HOLD", font=("Courier", 9, "bold"), fg="#1e1e2e", bg="#89b4fa", relief=tk.FLAT, padx=8, command=lambda: self._send_cmd(f"THOLD_SET {self.thold_slider.get():.1f}")).grid(row=4, column=2, padx=8)
+
+        # T_ON
+        tk.Label(frm, text="T_ON (1-10 ms):", font=("Courier", 9, "bold"), fg="#6c7086", bg="#181825").grid(row=5, column=0, sticky=tk.E, padx=8, pady=10)
+        self.ton_slider = tk.Scale(frm, from_=1.0, to=10.0, resolution=0.1, orient=tk.HORIZONTAL, length=200, bg="#313244", fg="#cdd6f4", troughcolor="#11111b", highlightthickness=0)
+        self.ton_slider.set(1.0)
+        self.ton_slider.grid(row=5, column=1, padx=8)
+        tk.Button(frm, text="Set T_ON", font=("Courier", 9, "bold"), fg="#1e1e2e", bg="#cba6f7", relief=tk.FLAT, padx=8, command=lambda: self._send_cmd(f"TON_SET {self.ton_slider.get():.1f}")).grid(row=5, column=2, padx=8)
+
+    def _on_ith_change(self, val):
+        try:
+            r_shunt = float(self.entry_rshunt.get())
+            gain = float(self.entry_gain.get())
+            i_th_A = float(val) / 1000.0
+            v_limit = i_th_A * r_shunt * gain
+            counts = voltage_to_counts(v_limit)
+            self.lbl_ith_calc.config(text=f"V: {v_limit:.2f}V\nDAC: {counts}")
+            self._send_cmd(f"DAC_SET {counts}")
+        except ValueError:
+            pass
 
     # ---------------------------------------------------------------- Tab DAC
     def _build_dac_tab(self, parent):
@@ -515,6 +587,32 @@ class AntiSELDashboard:
             while True:
                 kind, msg = self.rx_queue.get_nowait()
                 if kind == "rx":
+                    if msg.startswith("LOG_10HZ"):
+                        self._log_slow(msg)
+                        continue
+                    elif msg.startswith("TRACE_START"):
+                        self.trace_active = True
+                        self._log_slow(f"--- {msg} ---")
+                        try:
+                            ts = time.strftime("%Y%m%d_%H%M%S")
+                            self.trace_file = open(f"trace_{ts}.csv", "w")
+                            self.trace_file.write("trace_data\n")
+                        except Exception as e:
+                            self._log(f"Errore file traccia: {e}", "err")
+                        continue
+                    elif msg.startswith("TRACE_END"):
+                        self.trace_active = False
+                        self._log_slow(f"--- {msg} ---")
+                        if self.trace_file:
+                            self.trace_file.close()
+                            self.trace_file = None
+                        continue
+                    elif self.trace_active:
+                        if self.trace_file:
+                            self.trace_file.write(f"{msg}\n")
+                        # Skip UI update for trace body to avoid lag
+                        continue
+
                     self.rx_count += 1
                     self.metric_rx.config(text=str(self.rx_count))
                     if msg.startswith("DAC="):
@@ -580,6 +678,13 @@ class AntiSELDashboard:
         self.log.insert(tk.END, f"[{ts}] {msg}\n", tag)
         self.log.see(tk.END)
         self.log.config(state=tk.DISABLED)
+
+    def _log_slow(self, msg):
+        ts = time.strftime("%H:%M:%S")
+        self.slow_log.config(state=tk.NORMAL)
+        self.slow_log.insert(tk.END, f"[{ts}] {msg}\n")
+        self.slow_log.see(tk.END)
+        self.slow_log.config(state=tk.DISABLED)
 
     def _metric_card(self, parent, label, value):
         frame = tk.Frame(parent, bg="#313244", padx=14, pady=6)
