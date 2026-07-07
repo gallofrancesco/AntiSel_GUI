@@ -1,10 +1,10 @@
-# AntiSEL Dashboard v2.0
+# AntiSEL Dashboard v4.0
 
 Applicazione grafica per il controllo e il monitoraggio di dispositivi **AntiSEL** via comunicazione Ethernet TCP/IP.
 
 ## 📋 Descrizione
 
-Dashboard interattiva basata su **Tkinter** che consente di:
+Dashboard interattiva basata su **CustomTkinter** che consente di:
 - Comunicare con dispositivo NUCLEO-H755ZI-Q via TCP socket
 - Monitorare lo stato della connessione in tempo reale
 - Inviare comandi predefiniti e personalizzati
@@ -16,6 +16,7 @@ Dashboard interattiva basata su **Tkinter** che consente di:
 
 - **Python** 3.7+
 - **Tkinter** (incluso in Python standard)
+- **CustomTkinter** (modulo esterno per UI moderna)
 - **Socket TCP/IP** (modulo standard)
 
 ## ⚙️ Configurazione
@@ -49,9 +50,11 @@ python antisel_dashboard_eth.py
 
 - **Barra di stato**: Indicatore connessione (CONNESSO/DISCONNESSO) e indirizzo target
 - **Pannello metriche**: Visualizzazione real-time di RTT, pacchetti trasmessi/ricevuti e errori
-- **Log comunicazione**: Cronologia completa di TX/RX con color-coding
+- **Log comunicazione**: Cronologia completa di TX/RX con color-coding (inclusa area dedicata per Log 10Hz e Tracce)
 - **Pannello comandi**: Pulsanti azioni rapide + entry per comandi personalizzati
 - **Toggle Ping Loop**: Esecuzione automatica di PING ogni secondo con misurazione latenza
+- **Tab Gestione AntiSEL**: Configurazione parametri hardware (R_SHUNT, Gain) e soglie (I_TH, T_HOLD, T_ON)
+- **Tab Generatore d'Onda**: Generatore di segnali per il DAC (Sinusoidale, Quadra, Triangolare) configurabile per simulazioni e test.
 
 ## 🎯 Funzionalità Principali
 
