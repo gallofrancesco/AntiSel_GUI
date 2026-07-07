@@ -1,6 +1,14 @@
 """
-AntiSEL Dashboard v4.0 — Ethernet TCP (CustomTkinter UI)
+AntiSEL Dashboard v4.1 — Ethernet TCP (CustomTkinter UI)
 Comunicazione con NUCLEO-H755ZI-Q @ 192.168.1.100:7755
+
+v4.1:
+- Scala ADC corretta a 16 bit (il firmware usa ADC_RESOLUTION_16B)
+- Parsing traccia allineato al firmware: header TRACE_START con metadati
+  (FS, N, THOLD, TON, DAC, TICK) e righe "indice,valore"
+- Log 10 Hz salvato su CSV con timestamp (R-08)
+- Contatori SEL/HCE e flag FRESH dal firmware
+- Slider I_TH con debounce (un solo DAC_SET per regolazione)
 """
 
 import tkinter as tk
@@ -15,7 +23,9 @@ HOST    = "192.168.1.100"
 PORT    = 7755
 TIMEOUT = 3.0
 
-DAC_MAX_COUNTS = 4095
+DAC_MAX_COUNTS = 4095    # DAC della Nucleo: 12 bit
+ADC_MAX_COUNTS = 65535   # ADC della Nucleo: 16 bit (ADC_RESOLUTION_16B)
+DEFAULT_FS     = 100000  # sample rate ADC [Sa/s], sovrascritto dall'header traccia
 VREF           = 3.3
 
 def voltage_to_counts(v, vref=VREF):
@@ -44,7 +54,11 @@ class AntiSELDashboard(ctk.CTk):
         self.wave_thread      = None
         self.trace_active     = False
         self.trace_file       = None
-        
+        self.trace_fs         = DEFAULT_FS
+        self.trace_sample_idx = 0
+        self.log_csv          = None   # file CSV log 10 Hz (R-08)
+        self._ith_after_id    = None   # debounce slider I_TH
+
         self.tx_count = 0
         self.rx_count = 0
         
@@ -168,6 +182,8 @@ class AntiSELDashboard(ctk.CTk):
         # Metriche di Stato AntiSEL
         self.metric_state   = self._add_metric(frame_hw, 5, "Stato MCU", "—")
         self.metric_retries = self._add_metric(frame_hw, 6, "Tentativi SEL", "0/3")
+        self.metric_sel     = self._add_metric(frame_hw, 7, "Eventi SEL", "0")
+        self.metric_hce     = self._add_metric(frame_hw, 8, "Eventi HCE", "0")
 
         # Configurazione Parametri
         frame_cfg = ctk.CTkFrame(parent)
@@ -215,7 +231,11 @@ class AntiSELDashboard(ctk.CTk):
             v_limit = (i_th_mA / 1000.0) * r_shunt * gain
             counts = voltage_to_counts(v_limit)
             self.lbl_ith_calc.configure(text=f"{i_th_mA:.1f} mA\n(DAC: {counts})")
-            self._send_cmd(f"DAC_SET {counts}")
+            # Debounce: invia il DAC_SET solo 200 ms dopo l'ultimo movimento
+            # dello slider, per non inondare il link TCP
+            if self._ith_after_id is not None:
+                self.after_cancel(self._ith_after_id)
+            self._ith_after_id = self.after(200, lambda c=counts: self._send_cmd(f"DAC_SET {c}"))
         except ValueError:
             pass
 
@@ -321,8 +341,23 @@ class AntiSELDashboard(ctk.CTk):
         self.lbl_status.configure(text="● CONNESSO", text_color="green")
         self.btn_conn.configure(text="Disconnetti", fg_color="red", hover_color="darkred")
         self._log("Connesso.", "info")
+        # Apri il file CSV del log lento 10 Hz (R-08)
+        try:
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            self.log_csv = open(f"log10hz_{ts}.csv", "w")
+            self.log_csv.write("PC_Time,Tick_ms,ADC_raw,Current_mA,Fresh,State,Retry,SEL,HCE\n")
+            self._log(f"Log 10Hz su log10hz_{ts}.csv", "info")
+        except Exception as e:
+            self.log_csv = None
+            self._log(f"Errore file log 10Hz: {e}", "err")
 
     def _on_disconnected(self):
+        if self.log_csv:
+            try:
+                self.log_csv.close()
+            except Exception:
+                pass
+            self.log_csv = None
         self.lbl_status.configure(text="● DISCONNESSO", text_color="red")
         self.btn_conn.configure(text="Connetti", fg_color=["#3B8ED0", "#1F6AA5"], hover_color=["#36719F", "#144870"])
         self.btn_wave_start.configure(text="▶ Avvia Generatore", fg_color="green", hover_color="darkgreen")
@@ -375,63 +410,79 @@ class AntiSELDashboard(ctk.CTk):
                 kind, msg = self.rx_queue.get_nowait()
                 if kind == "rx":
                     if msg.startswith("LOG_10HZ"):
-                        # Esempio: LOG_10HZ TICK=1234 I=567 STATE=0 RETRY=1
+                        # Es: LOG_10HZ TICK=1234 I=567 FRESH=1 STATE=0 RETRY=1 SEL=0 HCE=0
+                        fields = self._parse_kv(msg)
                         try:
-                            parts = msg.split()
-                            for p in parts:
-                                if p.startswith("STATE="):
-                                    st = int(p.split("=")[1])
-                                    st_str = ["IDLE", "T_HOLD", "T_ON", "PERMANENT_OFF"][st] if st < 4 else str(st)
-                                    if st == 3: # PERMANENT_OFF
-                                        self.metric_state.configure(text=st_str, text_color="red")
-                                    else:
-                                        self.metric_state.configure(text=st_str, text_color="black")
-                                elif p.startswith("RETRY="):
-                                    ret = int(p.split("=")[1])
-                                    self.metric_retries.configure(text=f"{ret}/3", text_color="red" if ret >= 3 else "black")
+                            st = int(fields.get("STATE", -1))
+                            if st >= 0:
+                                st_str = ["IDLE", "T_HOLD", "T_ON", "PERMANENT_OFF"][st] if st < 4 else str(st)
+                                self.metric_state.configure(text=st_str, text_color="red" if st == 3 else "black")
+                            if "RETRY" in fields:
+                                ret = int(fields["RETRY"])
+                                self.metric_retries.configure(text=f"{ret}/3", text_color="red" if ret >= 3 else "black")
+                            if "SEL" in fields:
+                                self.metric_sel.configure(text=fields["SEL"])
+                            if "HCE" in fields:
+                                self.metric_hce.configure(text=fields["HCE"])
+                            # Scrittura CSV (R-08): timestamp PC + dato convertito in mA
+                            if self.log_csv and "I" in fields:
+                                adc_raw = int(fields["I"])
+                                i_mA = self._counts_to_mA(adc_raw)
+                                pc_ts = time.strftime("%Y-%m-%dT%H:%M:%S") + f".{int((time.time() % 1) * 1000):03d}"
+                                self.log_csv.write(
+                                    f"{pc_ts},{fields.get('TICK', '')},{adc_raw},{i_mA},"
+                                    f"{fields.get('FRESH', '')},{fields.get('STATE', '')},"
+                                    f"{fields.get('RETRY', '')},{fields.get('SEL', '')},{fields.get('HCE', '')}\n"
+                                )
                         except Exception:
                             pass
-                        
+
                         self._log_slow(msg)
                         continue
                     elif msg.startswith("TRACE_START"):
+                        # Es: TRACE_START SEL FS=100000 N=2108 THOLD_MS=1.0 TON_MS=1.0 DAC=2048 TICK=1234
                         self.trace_active = True
+                        self.trace_sample_idx = 0
+                        fields = self._parse_kv(msg)
+                        try:
+                            self.trace_fs = int(fields.get("FS", DEFAULT_FS))
+                        except Exception:
+                            self.trace_fs = DEFAULT_FS
                         self._log_slow(f"--- {msg} ---", "trace")
                         try:
                             ts = time.strftime("%Y%m%d_%H%M%S")
                             self.trace_file = open(f"trace_{ts}.csv", "w")
-                            self.trace_file.write("Time_us,Current_mA\n")
+                            # Metadati richiesti da spec §6.1 come commenti
+                            self.trace_file.write(f"# {msg}\n")
+                            self.trace_file.write(f"# PC_Time: {time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+                            self.trace_file.write(f"# R_SHUNT_ohm: {self.r_shunt.get()}  INA_GAIN: {self.ina_gain.get()}\n")
+                            self.trace_file.write("Time_us,ADC_raw,Current_mA\n")
                         except Exception as e:
                             self._log(f"Errore file traccia: {e}", "err")
                         continue
                     elif msg.startswith("TRACE_END"):
                         self.trace_active = False
-                        self._log_slow(f"--- {msg} ---", "trace")
+                        self._log_slow(f"--- {msg} ({self.trace_sample_idx} campioni) ---", "trace")
                         if self.trace_file:
                             self.trace_file.close()
                             self.trace_file = None
                         continue
                     elif self.trace_active:
+                        # Righe traccia dal firmware: "indice,valore_raw"
                         if self.trace_file:
                             try:
                                 parts = msg.split(",")
                                 if len(parts) == 2:
                                     idx = int(parts[0])
                                     adc_raw = int(parts[1])
-                                    
-                                    time_us = idx * 1.0  # Assumendo ADC a 1 Msps
-                                    
-                                    r_shunt = float(self.r_shunt.get())
-                                    gain = float(self.ina_gain.get())
-                                    
-                                    v_adc = (adc_raw / 4095.0) * VREF
-                                    i_shunt_mA = (v_adc / (r_shunt * gain)) * 1000.0
-                                    
-                                    self.trace_file.write(f"{time_us:.1f},{i_shunt_mA:.3f}\n")
+                                    time_us = idx * 1e6 / self.trace_fs
+                                    i_mA = self._counts_to_mA(adc_raw)
+                                    self.trace_file.write(f"{time_us:.1f},{adc_raw},{i_mA}\n")
+                                    self.trace_sample_idx += 1
                                 else:
-                                    self.trace_file.write(f"{msg}\n")
+                                    self.trace_file.write(f"# {msg}\n")
                             except Exception:
-                                self.trace_file.write(f"{msg}\n")
+                                self.trace_file.write(f"# {msg}\n")
                         continue
 
                     self.rx_count += 1
@@ -455,6 +506,28 @@ class AntiSELDashboard(ctk.CTk):
         except queue.Empty:
             pass
         self.after(100, self._poll_rx_queue)
+
+    # ============================================================ HELPERS
+    @staticmethod
+    def _parse_kv(msg):
+        """Estrae i campi KEY=VALUE da una riga di protocollo."""
+        out = {}
+        for tok in msg.split():
+            if "=" in tok:
+                k, v = tok.split("=", 1)
+                out[k] = v
+        return out
+
+    def _counts_to_mA(self, adc_raw):
+        """Converte un campione ADC 16-bit in mA (stringa) usando R_SHUNT e
+        gain INA301 correnti; '' se i parametri non sono validi."""
+        try:
+            r_shunt = float(self.r_shunt.get())
+            gain = float(self.ina_gain.get())
+            v_adc = (adc_raw / ADC_MAX_COUNTS) * VREF
+            return f"{(v_adc / (r_shunt * gain)) * 1000.0:.3f}"
+        except (ValueError, ZeroDivisionError):
+            return ""
 
     # ============================================================ PING LOOP
     def _toggle_ping_loop(self):
