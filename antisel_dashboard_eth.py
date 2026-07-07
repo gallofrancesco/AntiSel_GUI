@@ -165,6 +165,10 @@ class AntiSELDashboard(ctk.CTk):
         self.metric_dac  = self._add_metric(frame_hw, 3, "DAC read", "— counts")
         self.metric_dacv = self._add_metric(frame_hw, 4, "Volt read", "— V")
 
+        # Metriche di Stato AntiSEL
+        self.metric_state   = self._add_metric(frame_hw, 5, "Stato MCU", "—")
+        self.metric_retries = self._add_metric(frame_hw, 6, "Tentativi SEL", "0/3")
+
         # Configurazione Parametri
         frame_cfg = ctk.CTkFrame(parent)
         frame_cfg.grid(row=1, column=1, columnspan=2, padx=10, pady=5, sticky="nsew")
@@ -371,6 +375,23 @@ class AntiSELDashboard(ctk.CTk):
                 kind, msg = self.rx_queue.get_nowait()
                 if kind == "rx":
                     if msg.startswith("LOG_10HZ"):
+                        # Esempio: LOG_10HZ TICK=1234 I=567 STATE=0 RETRY=1
+                        try:
+                            parts = msg.split()
+                            for p in parts:
+                                if p.startswith("STATE="):
+                                    st = int(p.split("=")[1])
+                                    st_str = ["IDLE", "T_HOLD", "T_ON", "PERMANENT_OFF"][st] if st < 4 else str(st)
+                                    if st == 3: # PERMANENT_OFF
+                                        self.metric_state.configure(text=st_str, text_color="red")
+                                    else:
+                                        self.metric_state.configure(text=st_str, text_color="black")
+                                elif p.startswith("RETRY="):
+                                    ret = int(p.split("=")[1])
+                                    self.metric_retries.configure(text=f"{ret}/3", text_color="red" if ret >= 3 else "black")
+                        except Exception:
+                            pass
+                        
                         self._log_slow(msg)
                         continue
                     elif msg.startswith("TRACE_START"):
@@ -379,7 +400,7 @@ class AntiSELDashboard(ctk.CTk):
                         try:
                             ts = time.strftime("%Y%m%d_%H%M%S")
                             self.trace_file = open(f"trace_{ts}.csv", "w")
-                            self.trace_file.write("trace_data\n")
+                            self.trace_file.write("Time_us,Current_mA\n")
                         except Exception as e:
                             self._log(f"Errore file traccia: {e}", "err")
                         continue
@@ -392,7 +413,25 @@ class AntiSELDashboard(ctk.CTk):
                         continue
                     elif self.trace_active:
                         if self.trace_file:
-                            self.trace_file.write(f"{msg}\n")
+                            try:
+                                parts = msg.split(",")
+                                if len(parts) == 2:
+                                    idx = int(parts[0])
+                                    adc_raw = int(parts[1])
+                                    
+                                    time_us = idx * 1.0  # Assumendo ADC a 1 Msps
+                                    
+                                    r_shunt = float(self.r_shunt.get())
+                                    gain = float(self.ina_gain.get())
+                                    
+                                    v_adc = (adc_raw / 4095.0) * VREF
+                                    i_shunt_mA = (v_adc / (r_shunt * gain)) * 1000.0
+                                    
+                                    self.trace_file.write(f"{time_us:.1f},{i_shunt_mA:.3f}\n")
+                                else:
+                                    self.trace_file.write(f"{msg}\n")
+                            except Exception:
+                                self.trace_file.write(f"{msg}\n")
                         continue
 
                     self.rx_count += 1
