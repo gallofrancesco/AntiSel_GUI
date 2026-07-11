@@ -1,5 +1,5 @@
 """
-AntiSEL Dashboard v4.1 — Ethernet TCP (CustomTkinter UI)
+AntiSEL Dashboard v4.2 — Ethernet TCP (CustomTkinter UI)
 Comunicazione con NUCLEO-H755ZI-Q @ 192.168.1.100:7755
 
 v4.1:
@@ -9,6 +9,11 @@ v4.1:
 - Log 10 Hz salvato su CSV con timestamp (R-08)
 - Contatori SEL/HCE e flag FRESH dal firmware
 - Slider I_TH con debounce (un solo DAC_SET per regolazione)
+
+v4.2:
+- Soglie precaricate TH_LOAD/TH_SELECT (spec §8.2)
+- Log eventi/override manuale su CSV con timestamp (spec §5.3)
+- Nomenclatura file <DUT_id>_<LET>_<run_id>_<timestamp> (spec §6.3)
 """
 
 import tkinter as tk
@@ -34,13 +39,13 @@ def voltage_to_counts(v, vref=VREF):
 class AntiSELDashboard(ctk.CTk):
     def __init__(self):
         super().__init__()
-        
+
         # Tema e Colori
         ctk.set_appearance_mode("Light")
         ctk.set_default_color_theme("blue")
-        
+
         self.title("AntiSEL Dashboard")
-        self.geometry("1100x750")
+        self.geometry("1100x780")
         self.minsize(900, 600)
 
         # Variabili di stato
@@ -48,7 +53,7 @@ class AntiSELDashboard(ctk.CTk):
         self.connected        = False
         self.rx_queue         = queue.Queue()
         self.rx_thread        = None
-        
+
         self.ping_loop_active = False
         self.wave_active      = False
         self.wave_thread      = None
@@ -57,15 +62,21 @@ class AntiSELDashboard(ctk.CTk):
         self.trace_fs         = DEFAULT_FS
         self.trace_sample_idx = 0
         self.log_csv          = None   # file CSV log 10 Hz (R-08)
+        self.events_csv       = None   # file CSV eventi/override (spec §5.3)
         self._ith_after_id    = None   # debounce slider I_TH
 
         self.tx_count = 0
         self.rx_count = 0
-        
+
         # Variabili Hardware
         self.r_shunt = tk.StringVar(value="1.0")
         self.ina_gain = tk.StringVar(value="20")
         self.wave_type = tk.StringVar(value="Sinusoidale")
+
+        # Info run (spec §6.3: nomenclatura <DUT_id>_<LET>_<run_id>_<timestamp>)
+        self.dut_id = tk.StringVar(value="AD8629-01")
+        self.let_id = tk.StringVar(value="LET00")
+        self.run_id = tk.StringVar(value="RUN01")
 
         self._build_ui()
         self.after(100, self._poll_rx_queue)
@@ -86,7 +97,7 @@ class AntiSELDashboard(ctk.CTk):
         # Connessione
         self.lbl_status = ctk.CTkLabel(self.sidebar_frame, text="● DISCONNESSO", text_color="red", font=ctk.CTkFont(weight="bold"))
         self.lbl_status.grid(row=1, column=0, padx=20, pady=5)
-        
+
         self.lbl_target = ctk.CTkLabel(self.sidebar_frame, text=f"{HOST}:{PORT}")
         self.lbl_target.grid(row=2, column=0, padx=20, pady=0)
 
@@ -96,7 +107,7 @@ class AntiSELDashboard(ctk.CTk):
         # Metriche
         self.metrics_frame = ctk.CTkFrame(self.sidebar_frame)
         self.metrics_frame.grid(row=4, column=0, padx=15, pady=10, sticky="ew")
-        
+
         self.metric_ping = self._add_metric(self.metrics_frame, 0, "RTT ping", "— ms")
         self.metric_tx   = self._add_metric(self.metrics_frame, 1, "TX", "0")
         self.metric_rx   = self._add_metric(self.metrics_frame, 2, "RX", "0")
@@ -104,10 +115,10 @@ class AntiSELDashboard(ctk.CTk):
         # Comandi Rete / Test
         self.lbl_test = ctk.CTkLabel(self.sidebar_frame, text="Test di Rete", font=ctk.CTkFont(weight="bold"))
         self.lbl_test.grid(row=5, column=0, padx=20, pady=(20, 5))
-        
+
         self.btn_ping = ctk.CTkButton(self.sidebar_frame, text="PING", command=lambda: self._send_cmd("PING"))
         self.btn_ping.grid(row=6, column=0, padx=20, pady=5)
-        
+
         self.btn_ping_loop = ctk.CTkButton(self.sidebar_frame, text="Ping Loop", command=self._toggle_ping_loop, fg_color="transparent", border_width=2, text_color=("gray10", "#DCE4EE"))
         self.btn_ping_loop.grid(row=7, column=0, padx=20, pady=5)
 
@@ -129,11 +140,11 @@ class AntiSELDashboard(ctk.CTk):
         self.main_area.grid_columnconfigure(0, weight=1)
 
         # Tabs in alto
-        self.tabview = ctk.CTkTabview(self.main_area, height=350)
+        self.tabview = ctk.CTkTabview(self.main_area, height=380)
         self.tabview.grid(row=0, column=0, sticky="new")
         self.tabview.add("Gestione AntiSEL")
         self.tabview.add("Generatore d'Onda")
-        
+
         self._build_antisel_tab(self.tabview.tab("Gestione AntiSEL"))
         self._build_wave_tab(self.tabview.tab("Generatore d'Onda"))
 
@@ -155,26 +166,35 @@ class AntiSELDashboard(ctk.CTk):
 
         # Azioni Globali DUT
         frame_actions = ctk.CTkFrame(parent, fg_color="transparent")
-        frame_actions.grid(row=0, column=0, columnspan=3, pady=(10, 20), sticky="ew")
-        
+        frame_actions.grid(row=0, column=0, columnspan=3, pady=(10, 10), sticky="ew")
+
         ctk.CTkButton(frame_actions, text="DUT ON", fg_color="green", hover_color="darkgreen", command=lambda: self._send_cmd("DUT_ON")).pack(side="left", padx=10, expand=True)
         ctk.CTkButton(frame_actions, text="DUT OFF", fg_color="red", hover_color="darkred", command=lambda: self._send_cmd("DUT_OFF")).pack(side="left", padx=10, expand=True)
         ctk.CTkButton(frame_actions, text="RESET", fg_color="orange", hover_color="darkorange", text_color="black", command=lambda: self._send_cmd("RESET")).pack(side="left", padx=10, expand=True)
 
+        # Info Run (spec §6.3)
+        frame_run = ctk.CTkFrame(parent)
+        frame_run.grid(row=1, column=0, columnspan=3, padx=10, pady=(0, 5), sticky="ew")
+        ctk.CTkLabel(frame_run, text="Run:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(10, 0), pady=5)
+        for lbl, var, w in (("DUT id", self.dut_id, 110), ("LET", self.let_id, 70), ("Run id", self.run_id, 90)):
+            ctk.CTkLabel(frame_run, text=f"{lbl}:").pack(side="left", padx=(12, 3))
+            ctk.CTkEntry(frame_run, textvariable=var, width=w).pack(side="left")
+        ctk.CTkLabel(frame_run, text="(usati nei nomi dei file CSV)", font=ctk.CTkFont(size=10)).pack(side="left", padx=12)
+
         # Hardware Setup
         frame_hw = ctk.CTkFrame(parent)
-        frame_hw.grid(row=1, column=0, padx=10, pady=5, sticky="nsew")
-        
+        frame_hw.grid(row=2, column=0, padx=10, pady=5, sticky="nsew")
+
         ctk.CTkLabel(frame_hw, text="Hardware", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, columnspan=2, pady=5)
-        
+
         ctk.CTkLabel(frame_hw, text="R_SHUNT (Ω):").grid(row=1, column=0, padx=10, pady=5, sticky="e")
         self.entry_rshunt = ctk.CTkEntry(frame_hw, textvariable=self.r_shunt, width=80)
         self.entry_rshunt.grid(row=1, column=1, padx=10, pady=5)
-        
+
         ctk.CTkLabel(frame_hw, text="Gain INA301:").grid(row=2, column=0, padx=10, pady=5, sticky="e")
         self.entry_gain = ctk.CTkEntry(frame_hw, textvariable=self.ina_gain, width=80)
         self.entry_gain.grid(row=2, column=1, padx=10, pady=5)
-        
+
         # Metrica DAC in lettura
         self.metric_dac  = self._add_metric(frame_hw, 3, "DAC read", "— counts")
         self.metric_dacv = self._add_metric(frame_hw, 4, "Volt read", "— V")
@@ -187,19 +207,17 @@ class AntiSELDashboard(ctk.CTk):
 
         # Configurazione Parametri
         frame_cfg = ctk.CTkFrame(parent)
-        frame_cfg.grid(row=1, column=1, columnspan=2, padx=10, pady=5, sticky="nsew")
+        frame_cfg.grid(row=2, column=1, columnspan=2, padx=10, pady=5, sticky="nsew")
         frame_cfg.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(frame_cfg, text="Soglie e Tempistiche", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, columnspan=4, pady=5)
 
         # I_TH
         ctk.CTkLabel(frame_cfg, text="I_TH (mA):").grid(row=1, column=0, padx=10, pady=10, sticky="e")
-        self.ith_slider = ctk.CTkSlider(frame_hw, from_=1.0, to=50.0, number_of_steps=98, command=self._on_ith_change)
-        # spostiamo lo slider in frame_cfg
         self.ith_slider = ctk.CTkSlider(frame_cfg, from_=1.0, to=50.0, command=self._on_ith_change)
         self.ith_slider.set(10.0)
         self.ith_slider.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
-        
+
         self.lbl_ith_calc = ctk.CTkLabel(frame_cfg, text="10.0 mA\n(DAC: 0)", font=ctk.CTkFont(size=11))
         self.lbl_ith_calc.grid(row=1, column=2, padx=10, pady=10)
 
@@ -223,6 +241,16 @@ class AntiSELDashboard(ctk.CTk):
         self.btn_ton = ctk.CTkButton(frame_cfg, text="Set", width=50, command=lambda: self._send_cmd(f"TON_SET {self.ton_slider.get():.1f}"))
         self.btn_ton.grid(row=3, column=3, padx=10, pady=10)
 
+        # Soglie precaricate (spec §8.2): benchmark + 2 alternative
+        ctk.CTkLabel(frame_cfg, text="Preset I_TH:").grid(row=4, column=0, padx=10, pady=10, sticky="e")
+        frame_th = ctk.CTkFrame(frame_cfg, fg_color="transparent")
+        frame_th.grid(row=4, column=1, columnspan=3, padx=5, pady=5, sticky="ew")
+        for n in (1, 2, 3):
+            ctk.CTkButton(frame_th, text=f"Carica {n}", width=68,
+                          command=lambda n=n: self._th_load(n)).pack(side="left", padx=3)
+            ctk.CTkButton(frame_th, text=f"Usa {n}", width=55, fg_color="gray40", hover_color="gray25",
+                          command=lambda n=n: self._send_cmd(f"TH_SELECT {n}")).pack(side="left", padx=(0, 8))
+
     def _on_ith_change(self, val):
         try:
             r_shunt = float(self.r_shunt.get())
@@ -239,10 +267,23 @@ class AntiSELDashboard(ctk.CTk):
         except ValueError:
             pass
 
+    def _th_load(self, n):
+        """Carica il valore corrente dello slider I_TH nella preset n della
+        scheda (spec §8.2)."""
+        try:
+            r_shunt = float(self.r_shunt.get())
+            gain = float(self.ina_gain.get())
+            i_th_mA = float(self.ith_slider.get())
+            counts = voltage_to_counts((i_th_mA / 1000.0) * r_shunt * gain)
+            self._send_cmd(f"TH_LOAD {n} {counts}")
+            self._log(f"Preset {n} <- {i_th_mA:.1f} mA ({counts} counts)", "info")
+        except ValueError:
+            pass
+
     # ---------------------------------------------------------------- Tab Generatore
     def _build_wave_tab(self, parent):
         parent.grid_columnconfigure((0,1), weight=1)
-        
+
         # Tipo
         frm_tipo = ctk.CTkFrame(parent)
         frm_tipo.grid(row=0, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
@@ -298,7 +339,7 @@ class AntiSELDashboard(ctk.CTk):
         self.log.tag_config("rx", foreground="#008000")
         self.log.tag_config("info", foreground="#b35900")
         self.log.tag_config("err", foreground="#cc0000")
-        
+
         self.slow_log.tag_config("trace", foreground="#800080")
 
 
@@ -341,23 +382,36 @@ class AntiSELDashboard(ctk.CTk):
         self.lbl_status.configure(text="● CONNESSO", text_color="green")
         self.btn_conn.configure(text="Disconnetti", fg_color="red", hover_color="darkred")
         self._log("Connesso.", "info")
-        # Apri il file CSV del log lento 10 Hz (R-08)
+        # Apri i file CSV del run con nomenclatura §6.3:
+        # <DUT_id>_<LET>_<run_id>_<timestamp>_{log10hz|events}.csv
         try:
             ts = time.strftime("%Y%m%d_%H%M%S")
-            self.log_csv = open(f"log10hz_{ts}.csv", "w")
+            prefix = f"{self._run_prefix()}_{ts}"
+            self.log_csv = open(f"{prefix}_log10hz.csv", "w")
             self.log_csv.write("PC_Time,Tick_ms,ADC_raw,Current_mA,Fresh,State,Retry,SEL,HCE\n")
-            self._log(f"Log 10Hz su log10hz_{ts}.csv", "info")
+            self.events_csv = open(f"{prefix}_events.csv", "w")
+            self.events_csv.write("PC_Time,Event,Detail\n")
+            self._log(f"File di run: {prefix}_*.csv", "info")
+            self._log_event("CONNECT", f"{HOST}:{PORT}")
         except Exception as e:
             self.log_csv = None
-            self._log(f"Errore file log 10Hz: {e}", "err")
+            self.events_csv = None
+            self._log(f"Errore apertura file di run: {e}", "err")
 
     def _on_disconnected(self):
+        self._log_event("DISCONNECT")
         if self.log_csv:
             try:
                 self.log_csv.close()
             except Exception:
                 pass
             self.log_csv = None
+        if self.events_csv:
+            try:
+                self.events_csv.close()
+            except Exception:
+                pass
+            self.events_csv = None
         self.lbl_status.configure(text="● DISCONNESSO", text_color="red")
         self.btn_conn.configure(text="Connetti", fg_color=["#3B8ED0", "#1F6AA5"], hover_color=["#36719F", "#144870"])
         self.btn_wave_start.configure(text="▶ Avvia Generatore", fg_color="green", hover_color="darkgreen")
@@ -395,6 +449,11 @@ class AntiSELDashboard(ctk.CTk):
             self.after(0, lambda: self.metric_tx.configure(text=str(self.tx_count)))
             if not cmd.startswith("DAC_SET"):
                 self._log(f"-> {cmd}", "tx")
+            # Log eventi/override con timestamp (spec §5.3)
+            if cmd.startswith(("DUT_ON", "DUT_OFF", "RESET", "TH_SELECT",
+                               "TH_LOAD", "THOLD_SET", "TON_SET")):
+                parts = cmd.split(None, 1)
+                self._log_event(parts[0], parts[1] if len(parts) > 1 else "")
         except Exception as e:
             self._log(f"Errore TX: {e}", "err")
 
@@ -451,12 +510,16 @@ class AntiSELDashboard(ctk.CTk):
                         self._log_slow(f"--- {msg} ---", "trace")
                         try:
                             ts = time.strftime("%Y%m%d_%H%M%S")
-                            self.trace_file = open(f"trace_{ts}.csv", "w")
+                            toks = msg.split()
+                            ev = toks[1] if len(toks) > 1 else "EVT"
+                            fname = f"{self._run_prefix()}_{ts}_trace_{ev}.csv"
+                            self.trace_file = open(fname, "w")
                             # Metadati richiesti da spec §6.1 come commenti
                             self.trace_file.write(f"# {msg}\n")
                             self.trace_file.write(f"# PC_Time: {time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
                             self.trace_file.write(f"# R_SHUNT_ohm: {self.r_shunt.get()}  INA_GAIN: {self.ina_gain.get()}\n")
                             self.trace_file.write("Time_us,ADC_raw,Current_mA\n")
+                            self._log_event("TRACE", f"{ev} {fname}")
                         except Exception as e:
                             self._log(f"Errore file traccia: {e}", "err")
                         continue
@@ -487,7 +550,7 @@ class AntiSELDashboard(ctk.CTk):
 
                     self.rx_count += 1
                     self.metric_rx.configure(text=str(self.rx_count))
-                    
+
                     if msg.startswith("DAC="):
                         try:
                             counts = int(msg.split("=")[1])
@@ -496,7 +559,7 @@ class AntiSELDashboard(ctk.CTk):
                             self.metric_dacv.configure(text=f"{v:.2f} V")
                         except Exception:
                             pass
-                    
+
                     if not (self.wave_active and msg.startswith("DAC_SET")):
                         self._log(f"<- {msg}", "rx")
                 elif kind == "err":
@@ -528,6 +591,25 @@ class AntiSELDashboard(ctk.CTk):
             return f"{(v_adc / (r_shunt * gain)) * 1000.0:.3f}"
         except (ValueError, ZeroDivisionError):
             return ""
+
+    def _run_prefix(self):
+        """Prefisso file secondo spec §6.3: <DUT_id>_<LET>_<run_id>."""
+        def clean(s):
+            s = s.strip().replace(" ", "-")
+            s = "".join(ch for ch in s if ch.isalnum() or ch in "-_.")
+            return s or "NA"
+        return f"{clean(self.dut_id.get())}_{clean(self.let_id.get())}_{clean(self.run_id.get())}"
+
+    def _log_event(self, event, detail=""):
+        """Scrive un evento (override manuale, cambio parametri, tracce)
+        sul CSV eventi con timestamp PC (spec §5.3)."""
+        if self.events_csv:
+            try:
+                pc_ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+                self.events_csv.write(f"{pc_ts},{event},{detail}\n")
+                self.events_csv.flush()
+            except Exception:
+                pass
 
     # ============================================================ PING LOOP
     def _toggle_ping_loop(self):
@@ -589,7 +671,7 @@ class AntiSELDashboard(ctk.CTk):
                 norm = (math.sin(phase) + 1) / 2
             elif wtype == "Quadra":
                 norm = 1.0 if math.sin(phase) >= 0 else 0.0
-            else:  
+            else:
                 t = phase / (2 * math.pi)
                 norm = 2 * abs(t - math.floor(t + 0.5))
 
@@ -598,7 +680,7 @@ class AntiSELDashboard(ctk.CTk):
             counts = voltage_to_counts(v)
 
             self._send_cmd(f"DAC_SET {counts}")
-            
+
             phase += 2 * math.pi / samples
             if phase >= 2 * math.pi:
                 phase -= 2 * math.pi
