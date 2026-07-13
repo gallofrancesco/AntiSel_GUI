@@ -128,6 +128,36 @@ class AntiSELDashboard(ctk.CTk):
         self.log_frame.grid(row=1, column=0, columnspan=3, sticky="nsew", padx=6, pady=(0, 6))
         self._build_log_area(self.log_frame)
 
+        # --- Banner di conferma invio valori (overlay in alto, nascosto) ---
+        self._pending_cmd = None
+        self.notif = ctk.CTkFrame(self, fg_color="#7a5c00", border_color="#ffc107", border_width=2)
+        self.notif_lbl = ctk.CTkLabel(self.notif, text="", text_color="#ffffff",
+                                      font=ctk.CTkFont(size=12, weight="bold"))
+        self.notif_lbl.pack(side="left", padx=(12, 8), pady=8)
+        ctk.CTkButton(self.notif, text="✓ Conferma", width=96, fg_color="#1a7f37",
+                      hover_color="#146c2e", command=self._confirm_yes).pack(side="left", padx=4, pady=8)
+        ctk.CTkButton(self.notif, text="✗ Annulla", width=96, fg_color="#b02a37",
+                      hover_color="#8b1e29", command=self._confirm_no).pack(side="left", padx=(4, 12), pady=8)
+
+    def _confirm_send(self, cmd):
+        """Mostra la notifica di conferma prima di inviare un valore alla scheda."""
+        self._pending_cmd = cmd
+        self.notif_lbl.configure(text=f"Inviare  «{cmd}»  alla scheda?")
+        self.notif.place(relx=0.5, y=10, anchor="n")
+        self.notif.lift()
+
+    def _confirm_yes(self):
+        if self._pending_cmd:
+            self._send_cmd(self._pending_cmd)
+        self._pending_cmd = None
+        self.notif.place_forget()
+
+    def _confirm_no(self):
+        if self._pending_cmd:
+            self._log(f"Invio annullato: {self._pending_cmd}", "info")
+        self._pending_cmd = None
+        self.notif.place_forget()
+
     def _add_metric(self, parent, row, label, value):
         ctk.CTkLabel(parent, text=label, font=ctk.CTkFont(size=11, weight="bold")).grid(row=row, column=0, padx=10, pady=2, sticky="e")
         val_lbl = ctk.CTkLabel(parent, text=value, font=ctk.CTkFont(size=12))
@@ -196,10 +226,10 @@ class AntiSELDashboard(ctk.CTk):
         self.btn_ina_rst.pack(side="left", padx=(0, 10))
         ctk.CTkLabel(lr, text="N:").pack(side="left")
         ctk.CTkEntry(lr, textvariable=self.retry_max, width=42).pack(side="left", padx=(2, 4))
-        ctk.CTkButton(lr, text="Set", width=40, command=lambda: self._send_cmd(f"RETRY_SET {self.retry_max.get()}")).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(lr, text="Set", width=40, command=lambda: self._confirm_send(f"RETRY_SET {self.retry_max.get()}")).pack(side="left", padx=(0, 10))
         ctk.CTkLabel(lr, text="T_CLEAR:").pack(side="left")
         ctk.CTkEntry(lr, textvariable=self.t_clear, width=52).pack(side="left", padx=(2, 4))
-        ctk.CTkButton(lr, text="Set", width=40, command=lambda: self._send_cmd(f"TCLEAR_SET {self.t_clear.get()}")).pack(side="left")
+        ctk.CTkButton(lr, text="Set", width=40, command=lambda: self._confirm_send(f"TCLEAR_SET {self.t_clear.get()}")).pack(side="left")
 
         # --- Soglia I_TH (precisa) ---
         sec = self._section(p, r, "Soglia di corrente I_TH"); r += 1
@@ -219,17 +249,17 @@ class AntiSELDashboard(ctk.CTk):
         ctk.CTkLabel(pr, text="Preset:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 4))
         for n in (1, 2, 3):
             ctk.CTkButton(pr, text=f"Carica {n}", width=64, command=lambda n=n: self._th_load(n)).pack(side="left", padx=2)
-            ctk.CTkButton(pr, text=f"Usa {n}", width=48, fg_color="gray40", hover_color="gray25", command=lambda n=n: self._send_cmd(f"TH_SELECT {n}")).pack(side="left", padx=(0, 6))
+            ctk.CTkButton(pr, text=f"Usa {n}", width=48, fg_color="gray40", hover_color="gray25", command=lambda n=n: self._confirm_send(f"TH_SELECT {n}")).pack(side="left", padx=(0, 6))
 
         # --- Tempistiche ---
         sec = self._section(p, r, "Tempistiche"); r += 1
         tr = ctk.CTkFrame(sec, fg_color="transparent"); tr.pack(fill="x")
         ctk.CTkLabel(tr, text="T_HOLD (ms):").pack(side="left", padx=(0, 4))
         ctk.CTkEntry(tr, textvariable=self.thold_val, width=60).pack(side="left")
-        ctk.CTkButton(tr, text="Set", width=44, command=lambda: self._send_cmd(f"THOLD_SET {self.thold_val.get()}")).pack(side="left", padx=(4, 16))
+        ctk.CTkButton(tr, text="Set", width=44, command=lambda: self._confirm_send(f"THOLD_SET {self.thold_val.get()}")).pack(side="left", padx=(4, 16))
         ctk.CTkLabel(tr, text="T_ON (ms):").pack(side="left", padx=(0, 4))
         ctk.CTkEntry(tr, textvariable=self.ton_val, width=60).pack(side="left")
-        ctk.CTkButton(tr, text="Set", width=44, command=lambda: self._send_cmd(f"TON_SET {self.ton_val.get()}")).pack(side="left", padx=(4, 0))
+        ctk.CTkButton(tr, text="Set", width=44, command=lambda: self._confirm_send(f"TON_SET {self.ton_val.get()}")).pack(side="left", padx=(4, 0))
 
         # --- Hardware ---
         sec = self._section(p, r, "Hardware"); r += 1
@@ -257,8 +287,11 @@ class AntiSELDashboard(ctk.CTk):
         st2 = ctk.CTkFrame(sec, fg_color="transparent"); st2.pack(fill="x")
         self.metric_dac  = self._add_metric(st2, 0, "DAC read", "— counts")
         self.metric_dacv = self._add_metric(st2, 1, "Volt read", "— V")
+        self.metric_dut  = self._add_metric(st2, 2, "DUT", "—")
 
-        self._apply_ith()  # inizializza lbl_ith_calc + cur_dac
+        _c = self._ith_counts()  # inizializza solo l'anteprima (nessun invio/conferma)
+        if _c is not None:
+            self.cur_dac = _c
 
     def _section(self, parent, row, title):
         f = ctk.CTkFrame(parent)
@@ -269,21 +302,26 @@ class AntiSELDashboard(ctk.CTk):
         return body
 
     # ---------------------------------------------------------------- I_TH preciso
-    def _apply_ith(self, *_):
+    def _ith_counts(self):
+        """Clampa I_TH e aggiorna campo + anteprima DAC (NON invia). Ritorna counts o None."""
         try:
             mA = float(self.ith_val.get())
         except ValueError:
-            return
+            return None
         mA = max(I_TH_MIN, min(I_TH_MAX, mA))
         self.ith_val.set(f"{mA:.1f}")
         try:
             r = float(self.r_shunt.get()); g = float(self.ina_gain.get())
         except ValueError:
-            return
+            return None
         counts = voltage_to_counts((mA / 1000.0) * r * g)
-        self.cur_dac = counts
         self.lbl_ith_calc.configure(text=f"DAC: {counts}  ({counts / DAC_MAX_COUNTS * VREF:.2f} V)")
-        self._send_cmd(f"DAC_SET {counts}")
+        return counts
+
+    def _apply_ith(self, *_):
+        counts = self._ith_counts()
+        if counts is not None:
+            self._confirm_send(f"DAC_SET {counts}")
 
     def _ith_step(self, delta):
         try:
@@ -291,7 +329,7 @@ class AntiSELDashboard(ctk.CTk):
         except ValueError:
             mA = 10.0
         self.ith_val.set(f"{max(I_TH_MIN, min(I_TH_MAX, mA + delta)):.1f}")
-        self._apply_ith()
+        self._ith_counts()   # solo anteprima; l'invio avviene col bottone "Set"
 
     def _th_load(self, n):
         """Carica il valore I_TH corrente nella preset n (spec §8.2)."""
@@ -299,8 +337,7 @@ class AntiSELDashboard(ctk.CTk):
             r = float(self.r_shunt.get()); g = float(self.ina_gain.get())
             mA = float(self.ith_val.get())
             counts = voltage_to_counts((mA / 1000.0) * r * g)
-            self._send_cmd(f"TH_LOAD {n} {counts}")
-            self._log(f"Preset {n} <- {mA:.1f} mA ({counts} counts)", "info")
+            self._confirm_send(f"TH_LOAD {n} {counts}")
         except ValueError:
             pass
 
@@ -736,6 +773,12 @@ class AntiSELDashboard(ctk.CTk):
         else:
             color = "black"
         self.metric_state.configure(text=name, text_color=color)
+        # Indicatore DUT: OFF quando lo switch e' aperto (TON = power-cycle SEL,
+        # oppure PERMANENT_OFF = spento definitivo); ON negli altri stati.
+        if name in ("IDLE", "THOLD", "TON", "COOLDOWN", "PERMANENT_OFF"):
+            dut_off = name in ("TON", "PERMANENT_OFF")
+            self.metric_dut.configure(text="OFF" if dut_off else "ON",
+                                      text_color="#cc0000" if dut_off else "#1a7f37")
         if retry is not None:
             try:
                 nmax = int(self.retry_max.get())
