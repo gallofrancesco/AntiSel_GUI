@@ -30,6 +30,7 @@ TIMEOUT = 3.0
 DAC_MAX_COUNTS = 4095    # DAC della Nucleo: 12 bit
 ADC_MAX_COUNTS = 65535   # ADC della Nucleo: 16 bit (ADC_RESOLUTION_16B)
 DEFAULT_FS     = 100000  # sample rate ADC [Sa/s], sovrascritto dall'header traccia
+TRACE_PRE_MS   = 1.0     # pre-trigger nella traccia [ms] = TRACE_PRE_MS nel firmware
 VREF           = 3.3
 
 # Nomi stati allineati al firmware: IDLE/THOLD/TON/PERMANENT_OFF/COOLDOWN
@@ -93,6 +94,9 @@ class AntiSELDashboard(ctk.CTk):
         self._trace_acc = []
         self.trace_x  = []
         self.trace_y  = []
+        self.trace_thold_ms = 0.0   # da header TRACE_START (per marcare sgancio DUT)
+        self.trace_ton_ms   = 0.0   # da header TRACE_START (durata DUT spento)
+        self._trace_markers = []    # artisti matplotlib delle linee OFF/ON
         self.trace_lbl = ""
         self._plot_dirty = False
         self.plot_paused = False
@@ -387,7 +391,25 @@ class AntiSELDashboard(ctk.CTk):
                 if self.trace_x:
                     self.line_trace.set_data(self.trace_x, self.trace_y)
                     self.ax_trace.set_title(f"Ultima traccia evento — {self.trace_lbl}", fontsize=10)
+                    # rimuovi i marcatori DUT precedenti
+                    for m in self._trace_markers:
+                        try: m.remove()
+                        except Exception: pass
+                    self._trace_markers = []
                     self.ax_trace.relim(); self.ax_trace.autoscale_view()
+                    # marca sgancio/riaccensione del DUT (solo eventi con T_ON>0 = SEL)
+                    if self.trace_ton_ms > 0:
+                        t_off = (TRACE_PRE_MS + self.trace_thold_ms) * 1000.0
+                        t_on = (TRACE_PRE_MS + self.trace_thold_ms + self.trace_ton_ms) * 1000.0
+                        ytop = self.ax_trace.get_ylim()[1]
+                        span = self.ax_trace.axvspan(t_off, t_on, color="#ff9800", alpha=0.15)
+                        l1 = self.ax_trace.axvline(t_off, color="#e65100", lw=1.2, ls="--")
+                        l2 = self.ax_trace.axvline(t_on, color="#2e7d32", lw=1.2, ls="--")
+                        t1 = self.ax_trace.text(t_off, ytop, " DUT OFF", color="#e65100",
+                                                fontsize=7, va="top", ha="left")
+                        t2 = self.ax_trace.text(t_on, ytop, " DUT ON", color="#2e7d32",
+                                                fontsize=7, va="top", ha="left")
+                        self._trace_markers = [span, l1, l2, t1, t2]
                 self.canvas.draw_idle()
             except Exception:
                 pass
@@ -586,6 +608,12 @@ class AntiSELDashboard(ctk.CTk):
                             self.trace_fs = int(fields.get("FS", DEFAULT_FS))
                         except Exception:
                             self.trace_fs = DEFAULT_FS
+                        try:
+                            self.trace_thold_ms = float(fields.get("THOLD_MS", 0.0))
+                            self.trace_ton_ms = float(fields.get("TON_MS", 0.0))
+                        except Exception:
+                            self.trace_thold_ms = 0.0
+                            self.trace_ton_ms = 0.0
                         self._log_slow(f"--- {msg} ---", "trace")
                         try:
                             ts = time.strftime("%Y%m%d_%H%M%S")
