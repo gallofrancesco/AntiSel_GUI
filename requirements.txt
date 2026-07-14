@@ -12,3 +12,5 @@
 # - queue (thread-safe queue)
 
 customtkinter>=5.2.0
+matplotlib>=3.5.0
+numpy>=1.20.0
