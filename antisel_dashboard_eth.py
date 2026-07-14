@@ -30,11 +30,11 @@ TIMEOUT = 3.0
 DAC_MAX_COUNTS = 4095    # DAC della Nucleo: 12 bit
 ADC_MAX_COUNTS = 65535   # ADC della Nucleo: 16 bit (ADC_RESOLUTION_16B)
 DEFAULT_FS     = 100000  # sample rate ADC [Sa/s], sovrascritto dall'header traccia
-TRACE_PRE_MS   = 1.0     # pre-trigger nella traccia [ms] = TRACE_PRE_MS nel firmware
 VREF           = 3.3
 
-# Nomi stati allineati al firmware: IDLE/THOLD/TON/PERMANENT_OFF/COOLDOWN
-STATE_NAMES = ["IDLE", "THOLD", "TON", "PERMANENT_OFF", "COOLDOWN"]
+# Nomi stati allineati al firmware Fase 2 (macchina a 11 stati)
+STATE_NAMES = ["INIT", "IDLE", "ALARM", "HOLD_RUN", "HCE_SAVE", "CUTOFF",
+               "TON_RUN", "RECOVERY", "VERIFY", "MANUAL_OFF", "FAULT"]
 SEL_RETRY_MAX = 3
 
 I_TH_MIN, I_TH_MAX = 1.0, 50.0   # range soglia (R-02)
@@ -94,9 +94,6 @@ class AntiSELDashboard(ctk.CTk):
         self._trace_acc = []
         self.trace_x  = []
         self.trace_y  = []
-        self.trace_thold_ms = 0.0   # da header TRACE_START (per marcare sgancio DUT)
-        self.trace_ton_ms   = 0.0   # da header TRACE_START (durata DUT spento)
-        self._trace_markers = []    # artisti matplotlib delle linee OFF/ON
         self.trace_lbl = ""
         self._plot_dirty = False
         self.plot_paused = False
@@ -127,36 +124,6 @@ class AntiSELDashboard(ctk.CTk):
         self.log_frame = ctk.CTkFrame(self)
         self.log_frame.grid(row=1, column=0, columnspan=3, sticky="nsew", padx=6, pady=(0, 6))
         self._build_log_area(self.log_frame)
-
-        # --- Banner di conferma invio valori (overlay in alto, nascosto) ---
-        self._pending_cmd = None
-        self.notif = ctk.CTkFrame(self, fg_color="#7a5c00", border_color="#ffc107", border_width=2)
-        self.notif_lbl = ctk.CTkLabel(self.notif, text="", text_color="#ffffff",
-                                      font=ctk.CTkFont(size=12, weight="bold"))
-        self.notif_lbl.pack(side="left", padx=(12, 8), pady=8)
-        ctk.CTkButton(self.notif, text="✓ Conferma", width=96, fg_color="#1a7f37",
-                      hover_color="#146c2e", command=self._confirm_yes).pack(side="left", padx=4, pady=8)
-        ctk.CTkButton(self.notif, text="✗ Annulla", width=96, fg_color="#b02a37",
-                      hover_color="#8b1e29", command=self._confirm_no).pack(side="left", padx=(4, 12), pady=8)
-
-    def _confirm_send(self, cmd):
-        """Mostra la notifica di conferma prima di inviare un valore alla scheda."""
-        self._pending_cmd = cmd
-        self.notif_lbl.configure(text=f"Inviare  «{cmd}»  alla scheda?")
-        self.notif.place(relx=0.5, y=10, anchor="n")
-        self.notif.lift()
-
-    def _confirm_yes(self):
-        if self._pending_cmd:
-            self._send_cmd(self._pending_cmd)
-        self._pending_cmd = None
-        self.notif.place_forget()
-
-    def _confirm_no(self):
-        if self._pending_cmd:
-            self._log(f"Invio annullato: {self._pending_cmd}", "info")
-        self._pending_cmd = None
-        self.notif.place_forget()
 
     def _add_metric(self, parent, row, label, value):
         ctk.CTkLabel(parent, text=label, font=ctk.CTkFont(size=11, weight="bold")).grid(row=row, column=0, padx=10, pady=2, sticky="e")
@@ -217,6 +184,8 @@ class AntiSELDashboard(ctk.CTk):
         self.btn_dut_off.pack(side="left", padx=4, expand=True, fill="x")
         self.btn_reset = ctk.CTkButton(act, text="RESET", fg_color="orange", hover_color="darkorange", text_color="black", command=lambda: self._send_cmd("RESET"))
         self.btn_reset.pack(side="left", padx=4, expand=True, fill="x")
+        self.btn_ack = ctk.CTkButton(act, text="ACK FAULT", fg_color="#8a4500", hover_color="#6a3500", command=lambda: self._send_cmd("ACK FAULT"))
+        self.btn_ack.pack(side="left", padx=4, expand=True, fill="x")
         self.lbl_perm_warn = ctk.CTkLabel(sec, text="", text_color="#cc0000", justify="left", font=ctk.CTkFont(size=12, weight="bold"))
 
         # --- Latch INA301 ---
@@ -226,10 +195,10 @@ class AntiSELDashboard(ctk.CTk):
         self.btn_ina_rst.pack(side="left", padx=(0, 10))
         ctk.CTkLabel(lr, text="N:").pack(side="left")
         ctk.CTkEntry(lr, textvariable=self.retry_max, width=42).pack(side="left", padx=(2, 4))
-        ctk.CTkButton(lr, text="Set", width=40, command=lambda: self._confirm_send(f"RETRY_SET {self.retry_max.get()}")).pack(side="left", padx=(0, 10))
+        ctk.CTkButton(lr, text="Set", width=40, command=lambda: self._send_cmd(f"SET RETRY_MAX {self.retry_max.get()}")).pack(side="left", padx=(0, 10))
         ctk.CTkLabel(lr, text="T_CLEAR:").pack(side="left")
         ctk.CTkEntry(lr, textvariable=self.t_clear, width=52).pack(side="left", padx=(2, 4))
-        ctk.CTkButton(lr, text="Set", width=40, command=lambda: self._confirm_send(f"TCLEAR_SET {self.t_clear.get()}")).pack(side="left")
+        ctk.CTkButton(lr, text="Set", width=40, command=lambda: self._send_cmd(f"SET TCLEAR_MS {self.t_clear.get()}")).pack(side="left")
 
         # --- Soglia I_TH (precisa) ---
         sec = self._section(p, r, "Soglia di corrente I_TH"); r += 1
@@ -249,17 +218,17 @@ class AntiSELDashboard(ctk.CTk):
         ctk.CTkLabel(pr, text="Preset:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 4))
         for n in (1, 2, 3):
             ctk.CTkButton(pr, text=f"Carica {n}", width=64, command=lambda n=n: self._th_load(n)).pack(side="left", padx=2)
-            ctk.CTkButton(pr, text=f"Usa {n}", width=48, fg_color="gray40", hover_color="gray25", command=lambda n=n: self._confirm_send(f"TH_SELECT {n}")).pack(side="left", padx=(0, 6))
+            ctk.CTkButton(pr, text=f"Usa {n}", width=48, fg_color="gray40", hover_color="gray25", command=lambda n=n: self._send_cmd(f"TH_SELECT {n}")).pack(side="left", padx=(0, 6))
 
         # --- Tempistiche ---
         sec = self._section(p, r, "Tempistiche"); r += 1
         tr = ctk.CTkFrame(sec, fg_color="transparent"); tr.pack(fill="x")
         ctk.CTkLabel(tr, text="T_HOLD (ms):").pack(side="left", padx=(0, 4))
         ctk.CTkEntry(tr, textvariable=self.thold_val, width=60).pack(side="left")
-        ctk.CTkButton(tr, text="Set", width=44, command=lambda: self._confirm_send(f"THOLD_SET {self.thold_val.get()}")).pack(side="left", padx=(4, 16))
+        ctk.CTkButton(tr, text="Set", width=44, command=self._set_thold).pack(side="left", padx=(4, 16))
         ctk.CTkLabel(tr, text="T_ON (ms):").pack(side="left", padx=(0, 4))
         ctk.CTkEntry(tr, textvariable=self.ton_val, width=60).pack(side="left")
-        ctk.CTkButton(tr, text="Set", width=44, command=lambda: self._confirm_send(f"TON_SET {self.ton_val.get()}")).pack(side="left", padx=(4, 0))
+        ctk.CTkButton(tr, text="Set", width=44, command=self._set_ton).pack(side="left", padx=(4, 0))
 
         # --- Hardware ---
         sec = self._section(p, r, "Hardware"); r += 1
@@ -287,11 +256,8 @@ class AntiSELDashboard(ctk.CTk):
         st2 = ctk.CTkFrame(sec, fg_color="transparent"); st2.pack(fill="x")
         self.metric_dac  = self._add_metric(st2, 0, "DAC read", "— counts")
         self.metric_dacv = self._add_metric(st2, 1, "Volt read", "— V")
-        self.metric_dut  = self._add_metric(st2, 2, "DUT", "—")
 
-        _c = self._ith_counts()  # inizializza solo l'anteprima (nessun invio/conferma)
-        if _c is not None:
-            self.cur_dac = _c
+        self._apply_ith()  # inizializza lbl_ith_calc + cur_dac
 
     def _section(self, parent, row, title):
         f = ctk.CTkFrame(parent)
@@ -302,26 +268,25 @@ class AntiSELDashboard(ctk.CTk):
         return body
 
     # ---------------------------------------------------------------- I_TH preciso
-    def _ith_counts(self):
-        """Clampa I_TH e aggiorna campo + anteprima DAC (NON invia). Ritorna counts o None."""
+    def _apply_ith(self, *_):
         try:
             mA = float(self.ith_val.get())
         except ValueError:
-            return None
+            return
         mA = max(I_TH_MIN, min(I_TH_MAX, mA))
         self.ith_val.set(f"{mA:.1f}")
         try:
             r = float(self.r_shunt.get()); g = float(self.ina_gain.get())
         except ValueError:
-            return None
+            return
         counts = voltage_to_counts((mA / 1000.0) * r * g)
-        self.lbl_ith_calc.configure(text=f"DAC: {counts}  ({counts / DAC_MAX_COUNTS * VREF:.2f} V)")
-        return counts
-
-    def _apply_ith(self, *_):
-        counts = self._ith_counts()
-        if counts is not None:
-            self._confirm_send(f"DAC_SET {counts}")
+        self.cur_dac = counts
+        self.lbl_ith_calc.configure(
+            text=f"DAC≈{counts}  ({counts / DAC_MAX_COUNTS * VREF:.2f} V)  "
+                 f"[soglia calcolata dal firmware]")
+        # Protocollo v5: la soglia si invia in mA, il firmware calcola il DAC,
+        # valida il range elettrico e diventa la fonte di verità.
+        self._send_cmd(f"SET THRESHOLD_MA {mA:.1f}")
 
     def _ith_step(self, delta):
         try:
@@ -329,7 +294,7 @@ class AntiSELDashboard(ctk.CTk):
         except ValueError:
             mA = 10.0
         self.ith_val.set(f"{max(I_TH_MIN, min(I_TH_MAX, mA + delta)):.1f}")
-        self._ith_counts()   # solo anteprima; l'invio avviene col bottone "Set"
+        self._apply_ith()
 
     def _th_load(self, n):
         """Carica il valore I_TH corrente nella preset n (spec §8.2)."""
@@ -337,9 +302,43 @@ class AntiSELDashboard(ctk.CTk):
             r = float(self.r_shunt.get()); g = float(self.ina_gain.get())
             mA = float(self.ith_val.get())
             counts = voltage_to_counts((mA / 1000.0) * r * g)
-            self._confirm_send(f"TH_LOAD {n} {counts}")
+            self._send_cmd(f"TH_LOAD {n} {counts}")
+            self._log(f"Preset {n} <- {mA:.1f} mA ({counts} counts)", "info")
         except ValueError:
             pass
+
+    # ---------------------------------------------------------------- Tempi (µs)
+    def _set_thold(self):
+        """T_HOLD: la GUI usa i ms, il firmware vuole i µs (protocollo v5)."""
+        try:
+            us = int(round(float(self.thold_val.get()) * 1000))
+        except ValueError:
+            return
+        self._send_cmd(f"SET THOLD_US {us}")
+
+    def _set_ton(self):
+        try:
+            us = int(round(float(self.ton_val.get()) * 1000))
+        except ValueError:
+            return
+        self._send_cmd(f"SET TON_US {us}")
+
+    def _send_config(self):
+        """Invia l'intera config elettrica/parametrica al firmware alla
+        connessione (protocollo v5 §7): il firmware diventa fonte di verità."""
+        try:
+            self._send_cmd(f"SET VREF_ADC {VREF:.3f}")
+            self._send_cmd(f"SET VREF_DAC {VREF:.3f}")
+            self._send_cmd(f"SET GAIN {int(float(self.ina_gain.get()))}")
+            self._send_cmd(f"SET RSHUNT {float(self.r_shunt.get()):.3f}")
+            self._send_cmd(f"SET THRESHOLD_MA {float(self.ith_val.get()):.1f}")
+            self._set_thold()
+            self._set_ton()
+            self._send_cmd(f"SET RETRY_MAX {int(self.retry_max.get())}")
+            self._send_cmd(f"SET TCLEAR_MS {int(self.t_clear.get())}")
+            self._send_cmd("GET CONFIG")
+        except (ValueError, AttributeError):
+            self._log("Config non inviata: parametri non validi.", "err")
 
     # ---------------------------------------------------------------- Grafici
     def _build_charts(self, p):
@@ -428,25 +427,7 @@ class AntiSELDashboard(ctk.CTk):
                 if self.trace_x:
                     self.line_trace.set_data(self.trace_x, self.trace_y)
                     self.ax_trace.set_title(f"Ultima traccia evento — {self.trace_lbl}", fontsize=10)
-                    # rimuovi i marcatori DUT precedenti
-                    for m in self._trace_markers:
-                        try: m.remove()
-                        except Exception: pass
-                    self._trace_markers = []
                     self.ax_trace.relim(); self.ax_trace.autoscale_view()
-                    # marca sgancio/riaccensione del DUT (solo eventi con T_ON>0 = SEL)
-                    if self.trace_ton_ms > 0:
-                        t_off = (TRACE_PRE_MS + self.trace_thold_ms) * 1000.0
-                        t_on = (TRACE_PRE_MS + self.trace_thold_ms + self.trace_ton_ms) * 1000.0
-                        ytop = self.ax_trace.get_ylim()[1]
-                        span = self.ax_trace.axvspan(t_off, t_on, color="#ff9800", alpha=0.15)
-                        l1 = self.ax_trace.axvline(t_off, color="#e65100", lw=1.2, ls="--")
-                        l2 = self.ax_trace.axvline(t_on, color="#2e7d32", lw=1.2, ls="--")
-                        t1 = self.ax_trace.text(t_off, ytop, " DUT OFF", color="#e65100",
-                                                fontsize=7, va="top", ha="left")
-                        t2 = self.ax_trace.text(t_on, ytop, " DUT ON", color="#2e7d32",
-                                                fontsize=7, va="top", ha="left")
-                        self._trace_markers = [span, l1, l2, t1, t2]
                 self.canvas.draw_idle()
             except Exception:
                 pass
@@ -516,6 +497,8 @@ class AntiSELDashboard(ctk.CTk):
             self._log(f"File di run: {prefix}_*.csv", "info")
             self._log_event("CONNECT", f"{HOST}:{PORT}")
             self.slow_t.clear(); self.slow_i.clear(); self.slow_thr.clear(); self.slow_t0 = None
+            # Protocollo v5: invia la config elettrica/parametrica al firmware
+            self._send_config()
         except Exception as e:
             self.log_csv = None
             self.events_csv = None
@@ -564,13 +547,13 @@ class AntiSELDashboard(ctk.CTk):
     def _send_cmd(self, cmd):
         if not self.connected or not self.sock:
             return
-        if self.permanent_off and cmd.strip().upper().startswith("DUT_ON"):
+        if self.permanent_off and cmd.strip().upper().startswith(("DUT_ON", "SWITCH ON")):
             if not messagebox.askyesno(
-                    "DUT in PERMANENT_OFF",
-                    "Il DUT e' stato spento definitivamente dopo i SEL.\n\n"
-                    "Riaccenderlo forza l'override e riarma la protezione.\n"
-                    "Procedere comunque?"):
-                self._log("Accensione annullata (DUT in PERMANENT_OFF).", "info")
+                    "DUT in FAULT",
+                    "Il DUT e' in FAULT.\n\n"
+                    "Il firmware rifiutera' l'accensione: usare ACK FAULT o RESET.\n"
+                    "Inviare comunque?"):
+                self._log("Accensione annullata (DUT in FAULT).", "info")
                 return
         try:
             if cmd == "PING":
@@ -610,16 +593,29 @@ class AntiSELDashboard(ctk.CTk):
                                 self.metric_sel.configure(text=fields["SEL"])
                             if "HCE" in fields:
                                 self.metric_hce.configure(text=fields["HCE"])
-                            if "I" in fields:
-                                adc_raw = int(fields["I"])
-                                i_mA = self._counts_to_mA(adc_raw)
+                            if "I_MA" in fields or "I" in fields or "ADC" in fields:
+                                # v5: ADC grezzo in ADC=, corrente in mA già pronta
+                                # in I_MA= (calcolata dal firmware). Fallback al
+                                # vecchio campo I= (conteggi) per retrocompat.
+                                adc_raw = int(fields.get("ADC", fields.get("I", 0)))
+                                if "I_MA" in fields:
+                                    i_mA = float(fields["I_MA"])
+                                else:
+                                    try:
+                                        i_mA = float(self._counts_to_mA(adc_raw))
+                                    except ValueError:
+                                        i_mA = 0.0
+                                if "THR_MA" in fields:
+                                    thr = float(fields["THR_MA"])
+                                else:
+                                    thr = self._threshold_mA()
                                 now = time.time()
                                 if self.slow_t0 is None:
                                     self.slow_t0 = now
                                 try:
-                                    self.slow_i.append(float(i_mA))
+                                    self.slow_i.append(i_mA)
                                     self.slow_t.append(now - self.slow_t0)
-                                    self.slow_thr.append(self._threshold_mA())
+                                    self.slow_thr.append(thr)
                                     self._plot_dirty = True
                                 except ValueError:
                                     pass
@@ -645,12 +641,6 @@ class AntiSELDashboard(ctk.CTk):
                             self.trace_fs = int(fields.get("FS", DEFAULT_FS))
                         except Exception:
                             self.trace_fs = DEFAULT_FS
-                        try:
-                            self.trace_thold_ms = float(fields.get("THOLD_MS", 0.0))
-                            self.trace_ton_ms = float(fields.get("TON_MS", 0.0))
-                        except Exception:
-                            self.trace_thold_ms = 0.0
-                            self.trace_ton_ms = 0.0
                         self._log_slow(f"--- {msg} ---", "trace")
                         try:
                             ts = time.strftime("%Y%m%d_%H%M%S")
@@ -766,19 +756,14 @@ class AntiSELDashboard(ctk.CTk):
             name = STATE_NAMES[state] if 0 <= state < len(STATE_NAMES) else str(state)
         else:
             name = state or "—"
-        if name == "PERMANENT_OFF":
+        if name in ("FAULT", "MANUAL_OFF"):
             color = "#cc0000"
-        elif name in ("THOLD", "TON", "COOLDOWN"):
+        elif name in ("ALARM", "HOLD_RUN", "HCE_SAVE", "CUTOFF", "TON_RUN",
+                      "RECOVERY", "VERIFY"):
             color = "#b35900"
         else:
             color = "black"
         self.metric_state.configure(text=name, text_color=color)
-        # Indicatore DUT: OFF quando lo switch e' aperto (TON = power-cycle SEL,
-        # oppure PERMANENT_OFF = spento definitivo); ON negli altri stati.
-        if name in ("IDLE", "THOLD", "TON", "COOLDOWN", "PERMANENT_OFF"):
-            dut_off = name in ("TON", "PERMANENT_OFF")
-            self.metric_dut.configure(text="OFF" if dut_off else "ON",
-                                      text_color="#cc0000" if dut_off else "#1a7f37")
         if retry is not None:
             try:
                 nmax = int(self.retry_max.get())
@@ -786,7 +771,7 @@ class AntiSELDashboard(ctk.CTk):
                 nmax = SEL_RETRY_MAX
             self.metric_retries.configure(text=f"{retry}/{nmax}",
                                           text_color="#cc0000" if retry >= nmax else "black")
-        self._set_permanent_off(name == "PERMANENT_OFF")
+        self._set_permanent_off(name == "FAULT")
 
     def _set_permanent_off(self, perm):
         if perm == self.permanent_off:
@@ -795,10 +780,10 @@ class AntiSELDashboard(ctk.CTk):
         if perm:
             self.btn_dut_on.configure(state="disabled")
             self.lbl_perm_warn.configure(
-                text="⚠  DUT SPENTO DEFINITIVAMENTE — tentativi SEL esauriti.\n"
-                     "Premere RESET per riarmare e riabilitare l'accensione.")
+                text="⚠  FAULT — DUT spento (retry di recovery esauriti o ALERT "
+                     "bloccato).\nUsare ACK FAULT (o RESET) per riabilitare.")
             self.lbl_perm_warn.pack(fill="x", pady=(6, 0))
-            self._log("DUT in PERMANENT_OFF: accensione bloccata. Usare RESET.", "err")
+            self._log("Stato FAULT: accensione bloccata. Usare ACK FAULT o RESET.", "err")
         else:
             self.btn_dut_on.configure(state="normal")
             self.lbl_perm_warn.pack_forget()
