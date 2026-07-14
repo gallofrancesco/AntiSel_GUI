@@ -177,8 +177,8 @@ class AntiSELDashboard(ctk.CTk):
         frame_run.grid(row=1, column=0, columnspan=3, padx=10, pady=(0, 5), sticky="ew")
         ctk.CTkLabel(frame_run, text="Run:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(10, 0), pady=5)
         for lbl, var, w in (("DUT id", self.dut_id, 110), ("LET", self.let_id, 70), ("Run id", self.run_id, 90)):
-            ctk.CTkLabel(rr, text=f"{lbl}:").pack(side="left", padx=(0, 3))
-            ctk.CTkEntry(rr, textvariable=var, width=w).pack(side="left", padx=(0, 8))
+            ctk.CTkLabel(frame_run, text=f"{lbl}:").pack(side="left", padx=(0, 3))
+            ctk.CTkEntry(frame_run, textvariable=var, width=w).pack(side="left", padx=(0, 8))
 
         # Hardware Setup
         frame_hw = ctk.CTkFrame(parent)
