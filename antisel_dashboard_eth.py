@@ -33,6 +33,13 @@ DEFAULT_FS     = 100000  # sample rate ADC [Sa/s], sovrascritto dall'header trac
 TRACE_PRE_MS   = 1.0     # pre-trigger nella traccia [ms] = TRACE_PRE_MS nel firmware
 VREF           = 3.3
 
+# Nomi stati allineati al firmware: IDLE/THOLD/TON/PERMANENT_OFF/COOLDOWN
+STATE_NAMES = ["IDLE", "THOLD", "TON", "PERMANENT_OFF", "COOLDOWN"]
+SEL_RETRY_MAX = 3
+
+I_TH_MIN, I_TH_MAX = 1.0, 50.0   # range soglia (R-02)
+
+
 def voltage_to_counts(v, vref=VREF):
     return int(max(0, min(DAC_MAX_COUNTS, round(v / vref * DAC_MAX_COUNTS))))
 
@@ -76,6 +83,23 @@ class AntiSELDashboard(ctk.CTk):
         self.dut_id = tk.StringVar(value="AD8629-01")
         self.let_id = tk.StringVar(value="LET00")
         self.run_id = tk.StringVar(value="RUN01")
+        self.retry_max = tk.StringVar(value="3")
+        self.t_clear   = tk.StringVar(value="30")
+
+        # Buffer grafici
+        self.slow_t   = deque(maxlen=600)
+        self.slow_i   = deque(maxlen=600)
+        self.slow_thr = deque(maxlen=600)
+        self.slow_t0  = None
+        self._trace_acc = []
+        self.trace_x  = []
+        self.trace_y  = []
+        self.trace_thold_ms = 0.0   # da header TRACE_START (per marcare sgancio DUT)
+        self.trace_ton_ms   = 0.0   # da header TRACE_START (durata DUT spento)
+        self._trace_markers = []    # artisti matplotlib delle linee OFF/ON
+        self.trace_lbl = ""
+        self._plot_dirty = False
+        self.plot_paused = False
 
         self._build_ui()
         self.after(40, self._poll_rx_queue)
@@ -83,74 +107,56 @@ class AntiSELDashboard(ctk.CTk):
 
     # ================================================================ UI
     def _build_ui(self):
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=0, minsize=215)   # rete
+        self.grid_columnconfigure(1, weight=2, minsize=500)   # controlli (si allarga)
+        self.grid_columnconfigure(2, weight=3, minsize=420)   # grafici (espande)
+        self.grid_rowconfigure(0, weight=3)
+        self.grid_rowconfigure(1, weight=1)                   # log
 
-        # --- SIDEBAR (Sinistra) ---
-        self.sidebar_frame = ctk.CTkFrame(self, width=240, corner_radius=0)
-        self.sidebar_frame.grid(row=0, column=0, rowspan=2, sticky="nsew")
-        self.sidebar_frame.grid_rowconfigure(8, weight=1) # Spazio vuoto
+        self.col_left  = ctk.CTkFrame(self, width=230, corner_radius=0)
+        self.col_left.grid(row=0, column=0, sticky="nsew")
+        self.col_mid   = ctk.CTkScrollableFrame(self, label_text="Controlli AntiSEL")
+        self.col_mid.grid(row=0, column=1, sticky="nsew", padx=(6, 3), pady=6)
+        self.col_right = ctk.CTkFrame(self, fg_color="transparent")
+        self.col_right.grid(row=0, column=2, sticky="nsew", padx=(3, 6), pady=6)
 
-        self.logo_label = ctk.CTkLabel(self.sidebar_frame, text="AntiSEL\nControl", font=ctk.CTkFont(size=24, weight="bold"))
-        self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 10))
+        self._build_left(self.col_left)
+        self._build_center(self.col_mid)
+        self._build_charts(self.col_right)
 
-        # Connessione
-        self.lbl_status = ctk.CTkLabel(self.sidebar_frame, text="● DISCONNESSO", text_color="red", font=ctk.CTkFont(weight="bold"))
-        self.lbl_status.grid(row=1, column=0, padx=20, pady=5)
+        self.log_frame = ctk.CTkFrame(self)
+        self.log_frame.grid(row=1, column=0, columnspan=3, sticky="nsew", padx=6, pady=(0, 6))
+        self._build_log_area(self.log_frame)
 
-        self.lbl_target = ctk.CTkLabel(self.sidebar_frame, text=f"{HOST}:{PORT}")
-        self.lbl_target.grid(row=2, column=0, padx=20, pady=0)
+        # --- Banner di conferma invio valori (overlay in alto, nascosto) ---
+        self._pending_cmd = None
+        self.notif = ctk.CTkFrame(self, fg_color="#7a5c00", border_color="#ffc107", border_width=2)
+        self.notif_lbl = ctk.CTkLabel(self.notif, text="", text_color="#ffffff",
+                                      font=ctk.CTkFont(size=12, weight="bold"))
+        self.notif_lbl.pack(side="left", padx=(12, 8), pady=8)
+        ctk.CTkButton(self.notif, text="✓ Conferma", width=96, fg_color="#1a7f37",
+                      hover_color="#146c2e", command=self._confirm_yes).pack(side="left", padx=4, pady=8)
+        ctk.CTkButton(self.notif, text="✗ Annulla", width=96, fg_color="#b02a37",
+                      hover_color="#8b1e29", command=self._confirm_no).pack(side="left", padx=(4, 12), pady=8)
 
-        self.btn_conn = ctk.CTkButton(self.sidebar_frame, text="Connetti", command=self._toggle_connection)
-        self.btn_conn.grid(row=3, column=0, padx=20, pady=15)
+    def _confirm_send(self, cmd):
+        """Mostra la notifica di conferma prima di inviare un valore alla scheda."""
+        self._pending_cmd = cmd
+        self.notif_lbl.configure(text=f"Inviare  «{cmd}»  alla scheda?")
+        self.notif.place(relx=0.5, y=10, anchor="n")
+        self.notif.lift()
 
-        # Metriche
-        self.metrics_frame = ctk.CTkFrame(self.sidebar_frame)
-        self.metrics_frame.grid(row=4, column=0, padx=15, pady=10, sticky="ew")
+    def _confirm_yes(self):
+        if self._pending_cmd:
+            self._send_cmd(self._pending_cmd)
+        self._pending_cmd = None
+        self.notif.place_forget()
 
-        self.metric_ping = self._add_metric(self.metrics_frame, 0, "RTT ping", "— ms")
-        self.metric_tx   = self._add_metric(self.metrics_frame, 1, "TX", "0")
-        self.metric_rx   = self._add_metric(self.metrics_frame, 2, "RX", "0")
-
-        # Comandi Rete / Test
-        self.lbl_test = ctk.CTkLabel(self.sidebar_frame, text="Test di Rete", font=ctk.CTkFont(weight="bold"))
-        self.lbl_test.grid(row=5, column=0, padx=20, pady=(20, 5))
-
-        self.btn_ping = ctk.CTkButton(self.sidebar_frame, text="PING", command=lambda: self._send_cmd("PING"))
-        self.btn_ping.grid(row=6, column=0, padx=20, pady=5)
-
-        self.btn_ping_loop = ctk.CTkButton(self.sidebar_frame, text="Ping Loop", command=self._toggle_ping_loop, fg_color="transparent", border_width=2, text_color=("gray10", "#DCE4EE"))
-        self.btn_ping_loop.grid(row=7, column=0, padx=20, pady=5)
-
-        self.btn_status = ctk.CTkButton(self.sidebar_frame, text="STATUS", command=lambda: self._send_cmd("STATUS"))
-        self.btn_status.grid(row=8, column=0, padx=20, pady=5, sticky="n")
-
-        # Comando Manuale
-        self.entry_cmd = ctk.CTkEntry(self.sidebar_frame, placeholder_text="Comando libero...")
-        self.entry_cmd.grid(row=9, column=0, padx=20, pady=(10, 5), sticky="ew")
-        self.entry_cmd.bind("<Return>", lambda e: self._send_manual())
-        self.btn_send = ctk.CTkButton(self.sidebar_frame, text="Invia", command=self._send_manual)
-        self.btn_send.grid(row=10, column=0, padx=20, pady=(0, 20), sticky="ew")
-
-
-        # --- AREA CENTRALE (Destra) ---
-        self.main_area = ctk.CTkFrame(self, fg_color="transparent")
-        self.main_area.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
-        self.main_area.grid_rowconfigure(1, weight=1) # Log area espande
-        self.main_area.grid_columnconfigure(0, weight=1)
-
-        # Tabs in alto
-        self.tabview = ctk.CTkTabview(self.main_area, height=380)
-        self.tabview.grid(row=0, column=0, sticky="new")
-        self.tabview.add("Gestione AntiSEL")
-        self.tabview.add("Generatore d'Onda")
-
-        self._build_antisel_tab(self.tabview.tab("Gestione AntiSEL"))
-        self._build_wave_tab(self.tabview.tab("Generatore d'Onda"))
-
-        # Log Area in basso
-        self._build_log_area(self.main_area)
-
+    def _confirm_no(self):
+        if self._pending_cmd:
+            self._log(f"Invio annullato: {self._pending_cmd}", "info")
+        self._pending_cmd = None
+        self.notif.place_forget()
 
     def _add_metric(self, parent, row, label, value):
         ctk.CTkLabel(parent, text=label, font=ctk.CTkFont(size=11, weight="bold")).grid(row=row, column=0, padx=10, pady=2, sticky="e")
@@ -158,163 +164,293 @@ class AntiSELDashboard(ctk.CTk):
         val_lbl.grid(row=row, column=1, padx=10, pady=2, sticky="w")
         return val_lbl
 
+    # ---------------------------------------------------------------- Colonna SX
+    def _build_left(self, p):
+        p.grid_columnconfigure(0, weight=1)
+        p.grid_rowconfigure(7, weight=1)
 
-    # ---------------------------------------------------------------- Tab AntiSEL
-    def _build_antisel_tab(self, parent):
-        parent.grid_columnconfigure(1, weight=1)
-        parent.grid_columnconfigure(2, weight=1)
+        ctk.CTkLabel(p, text="AntiSEL\nControl", font=ctk.CTkFont(size=22, weight="bold")).grid(row=0, column=0, padx=20, pady=(18, 8))
 
-        # Azioni Globali DUT
-        frame_actions = ctk.CTkFrame(parent, fg_color="transparent")
-        frame_actions.grid(row=0, column=0, columnspan=3, pady=(10, 10), sticky="ew")
+        self.lbl_status = ctk.CTkLabel(p, text="● DISCONNESSO", text_color="red", font=ctk.CTkFont(weight="bold"))
+        self.lbl_status.grid(row=1, column=0, padx=20, pady=4)
+        self.lbl_target = ctk.CTkLabel(p, text=f"{HOST}:{PORT}")
+        self.lbl_target.grid(row=2, column=0, padx=20)
+        self.btn_conn = ctk.CTkButton(p, text="Connetti", command=self._toggle_connection)
+        self.btn_conn.grid(row=3, column=0, padx=20, pady=12)
 
-        ctk.CTkButton(frame_actions, text="DUT ON", fg_color="green", hover_color="darkgreen", command=lambda: self._send_cmd("DUT_ON")).pack(side="left", padx=10, expand=True)
-        ctk.CTkButton(frame_actions, text="DUT OFF", fg_color="red", hover_color="darkred", command=lambda: self._send_cmd("DUT_OFF")).pack(side="left", padx=10, expand=True)
-        ctk.CTkButton(frame_actions, text="RESET", fg_color="orange", hover_color="darkorange", text_color="black", command=lambda: self._send_cmd("RESET")).pack(side="left", padx=10, expand=True)
+        mf = ctk.CTkFrame(p)
+        mf.grid(row=4, column=0, padx=15, pady=8, sticky="ew")
+        self.metric_ping = self._add_metric(mf, 0, "RTT ping", "— ms")
+        self.metric_tx   = self._add_metric(mf, 1, "TX", "0")
+        self.metric_rx   = self._add_metric(mf, 2, "RX", "0")
 
-        # Info Run (spec §6.3)
-        frame_run = ctk.CTkFrame(parent)
-        frame_run.grid(row=1, column=0, columnspan=3, padx=10, pady=(0, 5), sticky="ew")
-        ctk.CTkLabel(frame_run, text="Run:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(10, 0), pady=5)
-        for lbl, var, w in (("DUT id", self.dut_id, 110), ("LET", self.let_id, 70), ("Run id", self.run_id, 90)):
-            ctk.CTkLabel(frame_run, text=f"{lbl}:").pack(side="left", padx=(0, 3))
-            ctk.CTkEntry(frame_run, textvariable=var, width=w).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(p, text="Test di Rete", font=ctk.CTkFont(weight="bold")).grid(row=5, column=0, padx=20, pady=(14, 4))
+        tf = ctk.CTkFrame(p, fg_color="transparent")
+        tf.grid(row=6, column=0, padx=15, pady=2, sticky="ew")
+        tf.grid_columnconfigure((0, 1), weight=1)
+        ctk.CTkButton(tf, text="PING", command=lambda: self._send_cmd("PING")).grid(row=0, column=0, padx=3, pady=3, sticky="ew")
+        ctk.CTkButton(tf, text="STATUS", command=lambda: self._send_cmd("STATUS")).grid(row=0, column=1, padx=3, pady=3, sticky="ew")
+        self.btn_ping_loop = ctk.CTkButton(tf, text="Ping Loop", command=self._toggle_ping_loop, fg_color="transparent", border_width=2, text_color=("gray10", "#DCE4EE"))
+        self.btn_ping_loop.grid(row=1, column=0, columnspan=2, padx=3, pady=3, sticky="ew")
 
-        # Hardware Setup
-        frame_hw = ctk.CTkFrame(parent)
-        frame_hw.grid(row=2, column=0, padx=10, pady=5, sticky="nsew")
+        # spacer row 7
 
-        ctk.CTkLabel(frame_hw, text="Hardware", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, columnspan=2, pady=5)
+        cf = ctk.CTkFrame(p, fg_color="transparent")
+        cf.grid(row=8, column=0, padx=15, pady=(6, 16), sticky="ew")
+        cf.grid_columnconfigure(0, weight=1)
+        self.entry_cmd = ctk.CTkEntry(cf, placeholder_text="Comando libero...")
+        self.entry_cmd.grid(row=0, column=0, pady=(0, 5), sticky="ew")
+        self.entry_cmd.bind("<Return>", lambda e: self._send_manual())
+        ctk.CTkButton(cf, text="Invia", command=self._send_manual).grid(row=1, column=0, sticky="ew")
 
-        ctk.CTkLabel(frame_hw, text="R_SHUNT (Ω):").grid(row=1, column=0, padx=10, pady=5, sticky="e")
-        self.entry_rshunt = ctk.CTkEntry(frame_hw, textvariable=self.r_shunt, width=80)
-        self.entry_rshunt.grid(row=1, column=1, padx=10, pady=5)
+    # ---------------------------------------------------------------- Colonna CENTRO
+    def _build_center(self, p):
+        p.grid_columnconfigure(0, weight=1)
+        r = 0
 
-        ctk.CTkLabel(frame_hw, text="Gain INA301:").grid(row=2, column=0, padx=10, pady=5, sticky="e")
-        self.entry_gain = ctk.CTkEntry(frame_hw, textvariable=self.ina_gain, width=80)
-        self.entry_gain.grid(row=2, column=1, padx=10, pady=5)
+        # --- Azioni DUT ---
+        sec = self._section(p, r, "Azioni DUT"); r += 1
+        act = ctk.CTkFrame(sec, fg_color="transparent"); act.pack(fill="x")
+        self.btn_dut_on = ctk.CTkButton(act, text="DUT ON", fg_color="green", hover_color="darkgreen", command=lambda: self._send_cmd("DUT_ON"))
+        self.btn_dut_on.pack(side="left", padx=4, expand=True, fill="x")
+        self.btn_dut_off = ctk.CTkButton(act, text="DUT OFF", fg_color="red", hover_color="darkred", command=lambda: self._send_cmd("DUT_OFF"))
+        self.btn_dut_off.pack(side="left", padx=4, expand=True, fill="x")
+        self.btn_reset = ctk.CTkButton(act, text="RESET", fg_color="orange", hover_color="darkorange", text_color="black", command=lambda: self._send_cmd("RESET"))
+        self.btn_reset.pack(side="left", padx=4, expand=True, fill="x")
+        self.lbl_perm_warn = ctk.CTkLabel(sec, text="", text_color="#cc0000", justify="left", font=ctk.CTkFont(size=12, weight="bold"))
 
-        # Metrica DAC in lettura
-        self.metric_dac  = self._add_metric(frame_hw, 3, "DAC read", "— counts")
-        self.metric_dacv = self._add_metric(frame_hw, 4, "Volt read", "— V")
+        # --- Latch INA301 ---
+        sec = self._section(p, r, "Latch INA301 (policy riarmo)"); r += 1
+        lr = ctk.CTkFrame(sec, fg_color="transparent"); lr.pack(fill="x")
+        self.btn_ina_rst = ctk.CTkButton(lr, text="Reset allarme", width=110, fg_color="#b35900", hover_color="#8a4500", command=lambda: self._send_cmd("INA_RST"))
+        self.btn_ina_rst.pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(lr, text="N:").pack(side="left")
+        ctk.CTkEntry(lr, textvariable=self.retry_max, width=42).pack(side="left", padx=(2, 4))
+        ctk.CTkButton(lr, text="Set", width=40, command=lambda: self._confirm_send(f"RETRY_SET {self.retry_max.get()}")).pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(lr, text="T_CLEAR:").pack(side="left")
+        ctk.CTkEntry(lr, textvariable=self.t_clear, width=52).pack(side="left", padx=(2, 4))
+        ctk.CTkButton(lr, text="Set", width=40, command=lambda: self._confirm_send(f"TCLEAR_SET {self.t_clear.get()}")).pack(side="left")
 
-        # Metriche di Stato AntiSEL
-        self.metric_state   = self._add_metric(frame_hw, 5, "Stato MCU", "—")
-        self.metric_retries = self._add_metric(frame_hw, 6, "Tentativi SEL", "0/3")
-        self.metric_sel     = self._add_metric(frame_hw, 7, "Eventi SEL", "0")
-        self.metric_hce     = self._add_metric(frame_hw, 8, "Eventi HCE", "0")
-
-        # Configurazione Parametri
-        frame_cfg = ctk.CTkFrame(parent)
-        frame_cfg.grid(row=2, column=1, columnspan=2, padx=10, pady=5, sticky="nsew")
-        frame_cfg.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(frame_cfg, text="Soglie e Tempistiche", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, columnspan=4, pady=5)
-
-        # I_TH
-        ctk.CTkLabel(frame_cfg, text="I_TH (mA):").grid(row=1, column=0, padx=10, pady=10, sticky="e")
-        self.ith_slider = ctk.CTkSlider(frame_cfg, from_=1.0, to=50.0, command=self._on_ith_change)
-        self.ith_slider.set(10.0)
-        self.ith_slider.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
-
-        self.lbl_ith_calc = ctk.CTkLabel(frame_cfg, text="10.0 mA\n(DAC: 0)", font=ctk.CTkFont(size=11))
-        self.lbl_ith_calc.grid(row=1, column=2, padx=10, pady=10)
-
-        # T_HOLD
-        ctk.CTkLabel(frame_cfg, text="T_HOLD (ms):").grid(row=2, column=0, padx=10, pady=10, sticky="e")
-        self.lbl_thold_val = ctk.CTkLabel(frame_cfg, text="1.0", width=30)
-        self.lbl_thold_val.grid(row=2, column=2, padx=5, pady=10)
-        self.thold_slider = ctk.CTkSlider(frame_cfg, from_=1.0, to=10.0, command=lambda v: self.lbl_thold_val.configure(text=f"{v:.1f}"))
-        self.thold_slider.set(1.0)
-        self.thold_slider.grid(row=2, column=1, padx=10, pady=10, sticky="ew")
-        self.btn_thold = ctk.CTkButton(frame_cfg, text="Set", width=50, command=lambda: self._send_cmd(f"THOLD_SET {self.thold_slider.get():.1f}"))
-        self.btn_thold.grid(row=2, column=3, padx=10, pady=10)
-
-        # T_ON
-        ctk.CTkLabel(frame_cfg, text="T_ON (ms):").grid(row=3, column=0, padx=10, pady=10, sticky="e")
-        self.lbl_ton_val = ctk.CTkLabel(frame_cfg, text="1.0", width=30)
-        self.lbl_ton_val.grid(row=3, column=2, padx=5, pady=10)
-        self.ton_slider = ctk.CTkSlider(frame_cfg, from_=1.0, to=10.0, command=lambda v: self.lbl_ton_val.configure(text=f"{v:.1f}"))
-        self.ton_slider.set(1.0)
-        self.ton_slider.grid(row=3, column=1, padx=10, pady=10, sticky="ew")
-        self.btn_ton = ctk.CTkButton(frame_cfg, text="Set", width=50, command=lambda: self._send_cmd(f"TON_SET {self.ton_slider.get():.1f}"))
-        self.btn_ton.grid(row=3, column=3, padx=10, pady=10)
-
-        # Soglie precaricate (spec §8.2): benchmark + 2 alternative
-        ctk.CTkLabel(frame_cfg, text="Preset I_TH:").grid(row=4, column=0, padx=10, pady=10, sticky="e")
-        frame_th = ctk.CTkFrame(frame_cfg, fg_color="transparent")
-        frame_th.grid(row=4, column=1, columnspan=3, padx=5, pady=5, sticky="ew")
+        # --- Soglia I_TH (precisa) ---
+        sec = self._section(p, r, "Soglia di corrente I_TH"); r += 1
+        ithr = ctk.CTkFrame(sec, fg_color="transparent"); ithr.pack(fill="x")
+        ctk.CTkLabel(ithr, text="I_TH (mA):").pack(side="left", padx=(0, 4))
+        ctk.CTkButton(ithr, text="−1", width=34, command=lambda: self._ith_step(-1.0)).pack(side="left", padx=1)
+        ctk.CTkButton(ithr, text="−0.1", width=40, command=lambda: self._ith_step(-0.1)).pack(side="left", padx=1)
+        e = ctk.CTkEntry(ithr, textvariable=self.ith_val, width=70, justify="center")
+        e.pack(side="left", padx=3); e.bind("<Return>", self._apply_ith)
+        ctk.CTkButton(ithr, text="+0.1", width=40, command=lambda: self._ith_step(0.1)).pack(side="left", padx=1)
+        ctk.CTkButton(ithr, text="+1", width=34, command=lambda: self._ith_step(1.0)).pack(side="left", padx=1)
+        ctk.CTkButton(ithr, text="Set", width=44, command=self._apply_ith).pack(side="left", padx=(6, 0))
+        self.lbl_ith_calc = ctk.CTkLabel(sec, text="DAC: — ( — V)", font=ctk.CTkFont(size=11))
+        self.lbl_ith_calc.pack(anchor="w", pady=(4, 0))
+        # Preset (§8.2) — opzionali in questa fase
+        pr = ctk.CTkFrame(sec, fg_color="transparent"); pr.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(pr, text="Preset:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 4))
         for n in (1, 2, 3):
-            ctk.CTkButton(frame_th, text=f"Carica {n}", width=68,
-                          command=lambda n=n: self._th_load(n)).pack(side="left", padx=3)
-            ctk.CTkButton(frame_th, text=f"Usa {n}", width=55, fg_color="gray40", hover_color="gray25",
-                          command=lambda n=n: self._send_cmd(f"TH_SELECT {n}")).pack(side="left", padx=(0, 8))
+            ctk.CTkButton(pr, text=f"Carica {n}", width=64, command=lambda n=n: self._th_load(n)).pack(side="left", padx=2)
+            ctk.CTkButton(pr, text=f"Usa {n}", width=48, fg_color="gray40", hover_color="gray25", command=lambda n=n: self._confirm_send(f"TH_SELECT {n}")).pack(side="left", padx=(0, 6))
 
-    def _on_ith_change(self, val):
+        # --- Tempistiche ---
+        sec = self._section(p, r, "Tempistiche"); r += 1
+        tr = ctk.CTkFrame(sec, fg_color="transparent"); tr.pack(fill="x")
+        ctk.CTkLabel(tr, text="T_HOLD (ms):").pack(side="left", padx=(0, 4))
+        ctk.CTkEntry(tr, textvariable=self.thold_val, width=60).pack(side="left")
+        ctk.CTkButton(tr, text="Set", width=44, command=lambda: self._confirm_send(f"THOLD_SET {self.thold_val.get()}")).pack(side="left", padx=(4, 16))
+        ctk.CTkLabel(tr, text="T_ON (ms):").pack(side="left", padx=(0, 4))
+        ctk.CTkEntry(tr, textvariable=self.ton_val, width=60).pack(side="left")
+        ctk.CTkButton(tr, text="Set", width=44, command=lambda: self._confirm_send(f"TON_SET {self.ton_val.get()}")).pack(side="left", padx=(4, 0))
+
+        # --- Hardware ---
+        sec = self._section(p, r, "Hardware"); r += 1
+        hr = ctk.CTkFrame(sec, fg_color="transparent"); hr.pack(fill="x")
+        ctk.CTkLabel(hr, text="R_SHUNT (Ω):").pack(side="left", padx=(0, 4))
+        ctk.CTkEntry(hr, textvariable=self.r_shunt, width=70).pack(side="left", padx=(0, 16))
+        ctk.CTkLabel(hr, text="Gain INA301:").pack(side="left", padx=(0, 4))
+        ctk.CTkEntry(hr, textvariable=self.ina_gain, width=70).pack(side="left")
+
+        # --- Run ---
+        sec = self._section(p, r, "Run (nomi file CSV)"); r += 1
+        rr = ctk.CTkFrame(sec, fg_color="transparent"); rr.pack(fill="x")
+        for lbl, var, w in (("DUT id", self.dut_id, 110), ("LET", self.let_id, 70), ("Run id", self.run_id, 90)):
+            ctk.CTkLabel(rr, text=f"{lbl}:").pack(side="left", padx=(0, 3))
+            ctk.CTkEntry(rr, textvariable=var, width=w).pack(side="left", padx=(0, 8))
+
+        # --- Stato MCU ---
+        sec = self._section(p, r, "Stato"); r += 1
+        st = ctk.CTkFrame(sec, fg_color="transparent"); st.pack(fill="x")
+        st.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        self.metric_state   = self._add_metric(st, 0, "Stato MCU", "—")
+        self.metric_retries = self._add_metric(st, 1, "Tentativi", f"0/{SEL_RETRY_MAX}")
+        self.metric_sel     = self._add_metric(st, 2, "SEL", "0")
+        self.metric_hce     = self._add_metric(st, 3, "HCE", "0")
+        st2 = ctk.CTkFrame(sec, fg_color="transparent"); st2.pack(fill="x")
+        self.metric_dac  = self._add_metric(st2, 0, "DAC read", "— counts")
+        self.metric_dacv = self._add_metric(st2, 1, "Volt read", "— V")
+        self.metric_dut  = self._add_metric(st2, 2, "DUT", "—")
+
+        _c = self._ith_counts()  # inizializza solo l'anteprima (nessun invio/conferma)
+        if _c is not None:
+            self.cur_dac = _c
+
+    def _section(self, parent, row, title):
+        f = ctk.CTkFrame(parent)
+        f.grid(row=row, column=0, sticky="ew", padx=4, pady=4)
+        ctk.CTkLabel(f, text=title, font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=8, pady=(6, 2))
+        body = ctk.CTkFrame(f, fg_color="transparent")
+        body.pack(fill="x", padx=8, pady=(0, 8))
+        return body
+
+    # ---------------------------------------------------------------- I_TH preciso
+    def _ith_counts(self):
+        """Clampa I_TH e aggiorna campo + anteprima DAC (NON invia). Ritorna counts o None."""
         try:
-            r_shunt = float(self.r_shunt.get())
-            gain = float(self.ina_gain.get())
-            i_th_mA = float(val)
-            v_limit = (i_th_mA / 1000.0) * r_shunt * gain
-            counts = voltage_to_counts(v_limit)
-            self.lbl_ith_calc.configure(text=f"{i_th_mA:.1f} mA\n(DAC: {counts})")
-            # Debounce: invia il DAC_SET solo 200 ms dopo l'ultimo movimento
-            # dello slider, per non inondare il link TCP
-            if self._ith_after_id is not None:
-                self.after_cancel(self._ith_after_id)
-            self._ith_after_id = self.after(200, lambda c=counts: self._send_cmd(f"DAC_SET {c}"))
+            mA = float(self.ith_val.get())
         except ValueError:
-            pass
+            return None
+        mA = max(I_TH_MIN, min(I_TH_MAX, mA))
+        self.ith_val.set(f"{mA:.1f}")
+        try:
+            r = float(self.r_shunt.get()); g = float(self.ina_gain.get())
+        except ValueError:
+            return None
+        counts = voltage_to_counts((mA / 1000.0) * r * g)
+        self.lbl_ith_calc.configure(text=f"DAC: {counts}  ({counts / DAC_MAX_COUNTS * VREF:.2f} V)")
+        return counts
+
+    def _apply_ith(self, *_):
+        counts = self._ith_counts()
+        if counts is not None:
+            self._confirm_send(f"DAC_SET {counts}")
+
+    def _ith_step(self, delta):
+        try:
+            mA = float(self.ith_val.get())
+        except ValueError:
+            mA = 10.0
+        self.ith_val.set(f"{max(I_TH_MIN, min(I_TH_MAX, mA + delta)):.1f}")
+        self._ith_counts()   # solo anteprima; l'invio avviene col bottone "Set"
 
     def _th_load(self, n):
         """Carica il valore I_TH corrente nella preset n (spec §8.2)."""
         try:
-            r_shunt = float(self.r_shunt.get())
-            gain = float(self.ina_gain.get())
-            i_th_mA = float(self.ith_slider.get())
-            counts = voltage_to_counts((i_th_mA / 1000.0) * r_shunt * gain)
-            self._send_cmd(f"TH_LOAD {n} {counts}")
-            self._log(f"Preset {n} <- {i_th_mA:.1f} mA ({counts} counts)", "info")
+            r = float(self.r_shunt.get()); g = float(self.ina_gain.get())
+            mA = float(self.ith_val.get())
+            counts = voltage_to_counts((mA / 1000.0) * r * g)
+            self._confirm_send(f"TH_LOAD {n} {counts}")
         except ValueError:
             pass
 
-    # ---------------------------------------------------------------- Tab Generatore
-    def _build_wave_tab(self, parent):
-        parent.grid_columnconfigure((0,1), weight=1)
+    # ---------------------------------------------------------------- Grafici
+    def _build_charts(self, p):
+        p.grid_rowconfigure(1, weight=1)
+        p.grid_columnconfigure(0, weight=1)
 
-        # Tipo
-        frm_tipo = ctk.CTkFrame(parent)
-        frm_tipo.grid(row=0, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
-        ctk.CTkLabel(frm_tipo, text="Tipo Onda:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=10, pady=10)
-        self.seg_wave = ctk.CTkSegmentedButton(frm_tipo, values=["Sinusoidale", "Quadra", "Triangolare"], variable=self.wave_type)
-        self.seg_wave.pack(side="left", padx=10, pady=10, expand=True)
+        toolbar = ctk.CTkFrame(p, fg_color="transparent")
+        toolbar.grid(row=0, column=0, sticky="ew", padx=6, pady=(0, 2))
+        ctk.CTkLabel(toolbar, text="Grafici", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=(2, 12))
+        self.btn_pause = ctk.CTkButton(toolbar, text="⏸ Pausa", width=90, command=self._toggle_pause)
+        self.btn_pause.pack(side="left", padx=4)
+        ctk.CTkButton(toolbar, text="Azzera", width=80, fg_color="gray40", hover_color="gray25", command=self._clear_plots).pack(side="left", padx=4)
 
-        # Parametri
-        frm_par = ctk.CTkFrame(parent)
-        frm_par.grid(row=1, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
-        frm_par.grid_columnconfigure(1, weight=1)
+        self.fig = Figure(figsize=(5, 6), dpi=100)
+        self.fig.subplots_adjust(hspace=0.5, left=0.13, right=0.86, top=0.94, bottom=0.09)
 
-        ctk.CTkLabel(frm_par, text="Freq (Hz):").grid(row=0, column=0, padx=10, pady=10, sticky="e")
-        self.wave_freq = ctk.CTkSlider(frm_par, from_=0.1, to=10.0, command=self._update_wave_lbls)
-        self.wave_freq.set(1.0)
-        self.wave_freq.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
-        self.lbl_wave_f = ctk.CTkLabel(frm_par, text="1.0 Hz")
-        self.lbl_wave_f.grid(row=0, column=2, padx=10, pady=10)
+        self.ax_slow = self.fig.add_subplot(211)
+        self.ax_slow.set_title("Corrente DUT (log 10 Hz)", fontsize=10)
+        self.ax_slow.set_xlabel("t [s]", fontsize=8)
+        self.ax_slow.set_ylabel("I [mA]", fontsize=8)
+        self.ax_slow.grid(True, alpha=0.3)
+        self.ax_slow.tick_params(labelsize=8)
+        (self.line_slow,) = self.ax_slow.plot([], [], color="#2563eb", lw=1.2, label="I")
+        (self.line_thr,) = self.ax_slow.plot([], [], color="#cc0000", lw=1.0, ls="--", alpha=0.8, label="soglia (V_LIMIT)")
+        self.ax_slow.legend(loc="upper right", fontsize=7)
+        self.ax_slow_v = self.ax_slow.twinx()
+        self.ax_slow_v.set_ylabel("V [V]", fontsize=8)
+        self.ax_slow_v.tick_params(labelsize=8)
 
-        ctk.CTkLabel(frm_par, text="V max:").grid(row=1, column=0, padx=10, pady=10, sticky="e")
-        self.wave_vmax = ctk.CTkSlider(frm_par, from_=0.1, to=VREF, command=self._update_wave_lbls)
-        self.wave_vmax.set(VREF)
-        self.wave_vmax.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
-        self.lbl_wave_v = ctk.CTkLabel(frm_par, text=f"{VREF:.2f} V")
-        self.lbl_wave_v.grid(row=1, column=2, padx=10, pady=10)
+        self.ax_trace = self.fig.add_subplot(212)
+        self.ax_trace.set_title("Ultima traccia evento", fontsize=10)
+        self.ax_trace.set_xlabel("t [us]", fontsize=8)
+        self.ax_trace.set_ylabel("I [mA]", fontsize=8)
+        self.ax_trace.grid(True, alpha=0.3)
+        self.ax_trace.tick_params(labelsize=8)
+        (self.line_trace,) = self.ax_trace.plot([], [], color="#800080", lw=1.0)
 
-        # Avvio
-        self.btn_wave_start = ctk.CTkButton(parent, text="▶ Avvia Generatore", fg_color="green", hover_color="darkgreen", command=self._toggle_wave)
-        self.btn_wave_start.grid(row=2, column=0, columnspan=2, pady=20)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=p)
+        self.canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+        self.canvas.draw()
 
-    def _update_wave_lbls(self, _):
-        self.lbl_wave_f.configure(text=f"{self.wave_freq.get():.1f} Hz")
-        self.lbl_wave_v.configure(text=f"{self.wave_vmax.get():.2f} V")
+    def _toggle_pause(self):
+        self.plot_paused = not self.plot_paused
+        self.btn_pause.configure(text="▶ Riprendi" if self.plot_paused else "⏸ Pausa",
+                                 fg_color="green" if self.plot_paused else "#1f6aa5")
+
+    def _clear_plots(self):
+        self.slow_t.clear(); self.slow_i.clear(); self.slow_thr.clear()
+        self.slow_t0 = None
+        self.trace_x = []; self.trace_y = []
+        self._trace_acc = []
+        try:
+            self.line_slow.set_data([], [])
+            self.line_thr.set_data([], [])
+            self.line_trace.set_data([], [])
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _rg_factor(self):
+        try:
+            return float(self.r_shunt.get()) * float(self.ina_gain.get()) / 1000.0
+        except (ValueError, ZeroDivisionError):
+            return 0.02
+
+    def _threshold_mA(self):
+        """Soglia I_TH [mA] dal valore DAC attivo (slider/preset)."""
+        try:
+            r = float(self.r_shunt.get()); g = float(self.ina_gain.get())
+            v = self.cur_dac / DAC_MAX_COUNTS * VREF
+            return v / (r * g) * 1000.0
+        except (ValueError, ZeroDivisionError):
+            return 0.0
+
+    def _refresh_plots(self):
+        if self._plot_dirty and not self.plot_paused:
+            self._plot_dirty = False
+            try:
+                if self.slow_t:
+                    self.line_slow.set_data(list(self.slow_t), list(self.slow_i))
+                    self.line_thr.set_data(list(self.slow_t), list(self.slow_thr))
+                    self.ax_slow.relim(); self.ax_slow.autoscale_view()
+                    lo, hi = self.ax_slow.get_ylim()
+                    k = self._rg_factor()
+                    self.ax_slow_v.set_ylim(lo * k, hi * k)
+                if self.trace_x:
+                    self.line_trace.set_data(self.trace_x, self.trace_y)
+                    self.ax_trace.set_title(f"Ultima traccia evento — {self.trace_lbl}", fontsize=10)
+                    # rimuovi i marcatori DUT precedenti
+                    for m in self._trace_markers:
+                        try: m.remove()
+                        except Exception: pass
+                    self._trace_markers = []
+                    self.ax_trace.relim(); self.ax_trace.autoscale_view()
+                    # marca sgancio/riaccensione del DUT (solo eventi con T_ON>0 = SEL)
+                    if self.trace_ton_ms > 0:
+                        t_off = (TRACE_PRE_MS + self.trace_thold_ms) * 1000.0
+                        t_on = (TRACE_PRE_MS + self.trace_thold_ms + self.trace_ton_ms) * 1000.0
+                        ytop = self.ax_trace.get_ylim()[1]
+                        span = self.ax_trace.axvspan(t_off, t_on, color="#ff9800", alpha=0.15)
+                        l1 = self.ax_trace.axvline(t_off, color="#e65100", lw=1.2, ls="--")
+                        l2 = self.ax_trace.axvline(t_on, color="#2e7d32", lw=1.2, ls="--")
+                        t1 = self.ax_trace.text(t_off, ytop, " DUT OFF", color="#e65100",
+                                                fontsize=7, va="top", ha="left")
+                        t2 = self.ax_trace.text(t_on, ytop, " DUT ON", color="#2e7d32",
+                                                fontsize=7, va="top", ha="left")
+                        self._trace_markers = [span, l1, l2, t1, t2]
+                self.canvas.draw_idle()
+            except Exception:
+                pass
+        self.after(400, self._refresh_plots)
 
     # ---------------------------------------------------------------- Log area
     def _build_log_area(self, parent):
@@ -379,6 +515,7 @@ class AntiSELDashboard(ctk.CTk):
             self.events_csv.write("PC_Time,Event,Detail\n")
             self._log(f"File di run: {prefix}_*.csv", "info")
             self._log_event("CONNECT", f"{HOST}:{PORT}")
+            self.slow_t.clear(); self.slow_i.clear(); self.slow_thr.clear(); self.slow_t0 = None
         except Exception as e:
             self.log_csv = None
             self.events_csv = None
@@ -427,6 +564,14 @@ class AntiSELDashboard(ctk.CTk):
     def _send_cmd(self, cmd):
         if not self.connected or not self.sock:
             return
+        if self.permanent_off and cmd.strip().upper().startswith("DUT_ON"):
+            if not messagebox.askyesno(
+                    "DUT in PERMANENT_OFF",
+                    "Il DUT e' stato spento definitivamente dopo i SEL.\n\n"
+                    "Riaccenderlo forza l'override e riarma la protezione.\n"
+                    "Procedere comunque?"):
+                self._log("Accensione annullata (DUT in PERMANENT_OFF).", "info")
+                return
         try:
             if cmd == "PING":
                 self.ping_sent_time = time.time()
@@ -465,16 +610,26 @@ class AntiSELDashboard(ctk.CTk):
                                 self.metric_sel.configure(text=fields["SEL"])
                             if "HCE" in fields:
                                 self.metric_hce.configure(text=fields["HCE"])
-                            # Scrittura CSV (R-08): timestamp PC + dato convertito in mA
-                            if self.log_csv and "I" in fields:
+                            if "I" in fields:
                                 adc_raw = int(fields["I"])
                                 i_mA = self._counts_to_mA(adc_raw)
-                                pc_ts = time.strftime("%Y-%m-%dT%H:%M:%S") + f".{int((time.time() % 1) * 1000):03d}"
-                                self.log_csv.write(
-                                    f"{pc_ts},{fields.get('TICK', '')},{adc_raw},{i_mA},"
-                                    f"{fields.get('FRESH', '')},{fields.get('STATE', '')},"
-                                    f"{fields.get('RETRY', '')},{fields.get('SEL', '')},{fields.get('HCE', '')}\n"
-                                )
+                                now = time.time()
+                                if self.slow_t0 is None:
+                                    self.slow_t0 = now
+                                try:
+                                    self.slow_i.append(float(i_mA))
+                                    self.slow_t.append(now - self.slow_t0)
+                                    self.slow_thr.append(self._threshold_mA())
+                                    self._plot_dirty = True
+                                except ValueError:
+                                    pass
+                                if self.log_csv:
+                                    pc_ts = time.strftime("%Y-%m-%dT%H:%M:%S") + f".{int((now % 1) * 1000):03d}"
+                                    self.log_csv.write(
+                                        f"{pc_ts},{fields.get('TICK', '')},{adc_raw},{i_mA},"
+                                        f"{fields.get('FRESH', '')},{fields.get('STATE', '')},"
+                                        f"{fields.get('RETRY', '')},{fields.get('SEL', '')},{fields.get('HCE', '')}\n"
+                                    )
                         except Exception:
                             pass
                         self._log_slow(msg)
@@ -605,6 +760,48 @@ class AntiSELDashboard(ctk.CTk):
                 k, v = tok.split("=", 1)
                 out[k] = v
         return out
+
+    def _set_state_ui(self, state, retry=None):
+        if isinstance(state, int):
+            name = STATE_NAMES[state] if 0 <= state < len(STATE_NAMES) else str(state)
+        else:
+            name = state or "—"
+        if name == "PERMANENT_OFF":
+            color = "#cc0000"
+        elif name in ("THOLD", "TON", "COOLDOWN"):
+            color = "#b35900"
+        else:
+            color = "black"
+        self.metric_state.configure(text=name, text_color=color)
+        # Indicatore DUT: OFF quando lo switch e' aperto (TON = power-cycle SEL,
+        # oppure PERMANENT_OFF = spento definitivo); ON negli altri stati.
+        if name in ("IDLE", "THOLD", "TON", "COOLDOWN", "PERMANENT_OFF"):
+            dut_off = name in ("TON", "PERMANENT_OFF")
+            self.metric_dut.configure(text="OFF" if dut_off else "ON",
+                                      text_color="#cc0000" if dut_off else "#1a7f37")
+        if retry is not None:
+            try:
+                nmax = int(self.retry_max.get())
+            except (ValueError, AttributeError):
+                nmax = SEL_RETRY_MAX
+            self.metric_retries.configure(text=f"{retry}/{nmax}",
+                                          text_color="#cc0000" if retry >= nmax else "black")
+        self._set_permanent_off(name == "PERMANENT_OFF")
+
+    def _set_permanent_off(self, perm):
+        if perm == self.permanent_off:
+            return
+        self.permanent_off = perm
+        if perm:
+            self.btn_dut_on.configure(state="disabled")
+            self.lbl_perm_warn.configure(
+                text="⚠  DUT SPENTO DEFINITIVAMENTE — tentativi SEL esauriti.\n"
+                     "Premere RESET per riarmare e riabilitare l'accensione.")
+            self.lbl_perm_warn.pack(fill="x", pady=(6, 0))
+            self._log("DUT in PERMANENT_OFF: accensione bloccata. Usare RESET.", "err")
+        else:
+            self.btn_dut_on.configure(state="normal")
+            self.lbl_perm_warn.pack_forget()
 
     def _counts_to_mA(self, adc_raw):
         try:
