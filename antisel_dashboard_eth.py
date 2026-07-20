@@ -73,13 +73,6 @@ class AntiSELDashboard(ctk.CTk):
         self.tx_count = 0
         self.rx_count = 0
         self.cur_dac  = 2048   # ultimo valore DAC (soglia attiva)
-        self._pending_log_lines = []
-        self._pending_slow_log_lines = []
-        self._log_flush_scheduled = False
-        self._slow_log_flush_scheduled = False
-        self._current_offset_mA = 0.0
-        self._current_offset_samples = 0
-        self._current_offset_ready = False
 
         # Variabili
         self.r_shunt  = tk.StringVar(value="1.0")
@@ -102,12 +95,18 @@ class AntiSELDashboard(ctk.CTk):
         self.trace_x  = []
         self.trace_y  = []
         self.trace_lbl = ""
+        # Innesto degli eventi (traccia ad alta risoluzione) sul grafico
+        # continuo: ogni evento e' un segmento (x,y) in secondi sullo stesso
+        # asse temporale del log 10 Hz, cosi' compare nel punto giusto.
+        self._trace_overlay_acc = []
+        self.trace_overlay_segments = deque(maxlen=20)
+        self.trace_overlay_t0 = None
         self._plot_dirty = False
         self.plot_paused = False
 
         self._build_ui()
-        self.after(50, self._poll_rx_queue)
-        self.after(250, self._refresh_plots)
+        self.after(40, self._poll_rx_queue)
+        self.after(400, self._refresh_plots)
 
     # ================================================================ UI
     def _build_ui(self):
@@ -370,6 +369,7 @@ class AntiSELDashboard(ctk.CTk):
         self.ax_slow.tick_params(labelsize=8)
         (self.line_slow,) = self.ax_slow.plot([], [], color="#2563eb", lw=1.2, label="I")
         (self.line_thr,) = self.ax_slow.plot([], [], color="#cc0000", lw=1.0, ls="--", alpha=0.8, label="soglia (V_LIMIT)")
+        (self.line_slow_trace,) = self.ax_slow.plot([], [], color="#800080", lw=1.3, label="evento (100 kSa/s)")
         self.ax_slow.legend(loc="upper right", fontsize=7)
         self.ax_slow_v = self.ax_slow.twinx()
         self.ax_slow_v.set_ylabel("V [V]", fontsize=8)
@@ -397,10 +397,14 @@ class AntiSELDashboard(ctk.CTk):
         self.slow_t0 = None
         self.trace_x = []; self.trace_y = []
         self._trace_acc = []
+        self.trace_overlay_segments.clear()
+        self._trace_overlay_acc = []
+        self.trace_overlay_t0 = None
         try:
             self.line_slow.set_data([], [])
             self.line_thr.set_data([], [])
             self.line_trace.set_data([], [])
+            self.line_slow_trace.set_data([], [])
             self.canvas.draw_idle()
         except Exception:
             pass
@@ -427,6 +431,19 @@ class AntiSELDashboard(ctk.CTk):
                 if self.slow_t:
                     self.line_slow.set_data(list(self.slow_t), list(self.slow_i))
                     self.line_thr.set_data(list(self.slow_t), list(self.slow_thr))
+                    # Scarta i segmenti-evento usciti dalla finestra visibile del
+                    # log 10 Hz (altrimenti un vecchio evento tiene allargato
+                    # l'asse x anche quando il log corrente e' andato avanti).
+                    t_min = self.slow_t[0]
+                    while self.trace_overlay_segments and self.trace_overlay_segments[0][-1][0] < t_min:
+                        self.trace_overlay_segments.popleft()
+                    ox, oy = [], []
+                    for seg in self.trace_overlay_segments:
+                        if ox:
+                            ox.append(float("nan")); oy.append(float("nan"))
+                        ox.extend(p[0] for p in seg)
+                        oy.extend(p[1] for p in seg)
+                    self.line_slow_trace.set_data(ox, oy)
                     self.ax_slow.relim(); self.ax_slow.autoscale_view()
                     lo, hi = self.ax_slow.get_ylim()
                     k = self._rg_factor()
@@ -438,7 +455,7 @@ class AntiSELDashboard(ctk.CTk):
                 self.canvas.draw_idle()
             except Exception:
                 pass
-        self.after(250, self._refresh_plots)
+        self.after(400, self._refresh_plots)
 
     # ---------------------------------------------------------------- Log area
     def _build_log_area(self, parent):
@@ -504,9 +521,6 @@ class AntiSELDashboard(ctk.CTk):
             self._log(f"File di run: {prefix}_*.csv", "info")
             self._log_event("CONNECT", f"{HOST}:{PORT}")
             self.slow_t.clear(); self.slow_i.clear(); self.slow_thr.clear(); self.slow_t0 = None
-            self._current_offset_mA = 0.0
-            self._current_offset_samples = 0
-            self._current_offset_ready = False
             # Protocollo v5: invia la config elettrica/parametrica al firmware
             self._send_config()
         except Exception as e:
@@ -615,17 +629,6 @@ class AntiSELDashboard(ctk.CTk):
                                         i_mA = float(self._counts_to_mA(adc_raw))
                                     except ValueError:
                                         i_mA = 0.0
-                                if not self._current_offset_ready:
-                                    if self._current_offset_samples < 5:
-                                        self._current_offset_mA += i_mA
-                                        self._current_offset_samples += 1
-                                        if self._current_offset_samples >= 5:
-                                            self._current_offset_mA /= 5.0
-                                            self._current_offset_ready = True
-                                    else:
-                                        self._current_offset_ready = True
-                                if self._current_offset_ready:
-                                    i_mA = max(0.0, i_mA - self._current_offset_mA)
                                 if "THR_MA" in fields:
                                     thr = float(fields["THR_MA"])
                                 else:
@@ -655,6 +658,11 @@ class AntiSELDashboard(ctk.CTk):
                         self.trace_active = True
                         self.trace_sample_idx = 0
                         self._trace_acc = []
+                        self._trace_overlay_acc = []
+                        # Ancora l'evento sullo stesso asse temporale (secondi
+                        # dall'inizio) del log 10 Hz, cosi' l'innesto compare
+                        # nel punto giusto sul grafico continuo.
+                        self.trace_overlay_t0 = (time.time() - self.slow_t0) if self.slow_t0 is not None else None
                         _tk = msg.split()
                         self.trace_lbl = _tk[1] if len(_tk) > 1 else "EVT"
                         fields = self._parse_kv(msg)
@@ -683,6 +691,10 @@ class AntiSELDashboard(ctk.CTk):
                             self.trace_x = [pt[0] for pt in self._trace_acc]
                             self.trace_y = [pt[1] for pt in self._trace_acc]
                             self._plot_dirty = True
+                        if self._trace_overlay_acc:
+                            self.trace_overlay_segments.append(self._trace_overlay_acc)
+                            self._trace_overlay_acc = []
+                            self._plot_dirty = True
                         if self.trace_file:
                             self.trace_file.close()
                             self.trace_file = None
@@ -694,13 +706,12 @@ class AntiSELDashboard(ctk.CTk):
                                 idx = int(parts[0]); adc_raw = int(parts[1])
                                 time_us = idx * 1e6 / self.trace_fs
                                 i_mA = self._counts_to_mA(adc_raw)
-                                if self._current_offset_ready:
-                                    try:
-                                        i_mA = max(0.0, float(i_mA) - self._current_offset_mA)
-                                    except Exception:
-                                        pass
                                 try:
                                     self._trace_acc.append((time_us, float(i_mA)))
+                                    if self.trace_overlay_t0 is not None:
+                                        self._trace_overlay_acc.append(
+                                            (self.trace_overlay_t0 + time_us / 1e6, float(i_mA))
+                                        )
                                 except ValueError:
                                     pass
                                 if self.trace_file:
@@ -765,7 +776,7 @@ class AntiSELDashboard(ctk.CTk):
                     self._log(msg, "err")
         except queue.Empty:
             pass
-        self.after(50, self._poll_rx_queue)
+        self.after(40, self._poll_rx_queue)
 
     # ============================================================ HELPERS
     @staticmethod
@@ -860,43 +871,25 @@ class AntiSELDashboard(ctk.CTk):
 
     # ================================================================== LOG
     def _log(self, msg, tag="info"):
-        self._pending_log_lines.append((msg, tag))
-        if not self._log_flush_scheduled:
-            self._log_flush_scheduled = True
-            self.after(0, self._flush_log_batch)
+        self.after(0, lambda: self._log_main_thread(msg, tag))
 
-    def _flush_log_batch(self):
-        self._log_flush_scheduled = False
-        if not self._pending_log_lines:
-            return
-        lines = self._pending_log_lines
-        self._pending_log_lines = []
+    def _log_main_thread(self, msg, tag):
+        ts = time.strftime("%H:%M:%S")
         self.log.configure(state="normal")
-        for msg, tag in lines:
-            ts = time.strftime("%H:%M:%S")
-            self.log.insert("end", f"[{ts}] {msg}\n", tag)
+        self.log.insert("end", f"[{ts}] {msg}\n", tag)
         self.log.see("end")
         self.log.configure(state="disabled")
 
     def _log_slow(self, msg, tag=None):
-        self._pending_slow_log_lines.append((msg, tag))
-        if not self._slow_log_flush_scheduled:
-            self._slow_log_flush_scheduled = True
-            self.after(0, self._flush_slow_log_batch)
+        self.after(0, lambda: self._log_slow_main_thread(msg, tag))
 
-    def _flush_slow_log_batch(self):
-        self._slow_log_flush_scheduled = False
-        if not self._pending_slow_log_lines:
-            return
-        lines = self._pending_slow_log_lines
-        self._pending_slow_log_lines = []
+    def _log_slow_main_thread(self, msg, tag):
+        ts = time.strftime("%H:%M:%S")
         self.slow_log.configure(state="normal")
-        for msg, tag in lines:
-            ts = time.strftime("%H:%M:%S")
-            if tag:
-                self.slow_log.insert("end", f"[{ts}] {msg}\n", tag)
-            else:
-                self.slow_log.insert("end", f"[{ts}] {msg}\n")
+        if tag:
+            self.slow_log.insert("end", f"[{ts}] {msg}\n", tag)
+        else:
+            self.slow_log.insert("end", f"[{ts}] {msg}\n")
         self.slow_log.see("end")
         self.slow_log.configure(state="disabled")
 
