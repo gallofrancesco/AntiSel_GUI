@@ -73,6 +73,13 @@ class AntiSELDashboard(ctk.CTk):
         self.tx_count = 0
         self.rx_count = 0
         self.cur_dac  = 2048   # ultimo valore DAC (soglia attiva)
+        self._pending_log_lines = []
+        self._pending_slow_log_lines = []
+        self._log_flush_scheduled = False
+        self._slow_log_flush_scheduled = False
+        self._current_offset_mA = 0.0
+        self._current_offset_samples = 0
+        self._current_offset_ready = False
 
         # Variabili
         self.r_shunt  = tk.StringVar(value="1.0")
@@ -99,8 +106,8 @@ class AntiSELDashboard(ctk.CTk):
         self.plot_paused = False
 
         self._build_ui()
-        self.after(40, self._poll_rx_queue)
-        self.after(400, self._refresh_plots)
+        self.after(50, self._poll_rx_queue)
+        self.after(250, self._refresh_plots)
 
     # ================================================================ UI
     def _build_ui(self):
@@ -431,7 +438,7 @@ class AntiSELDashboard(ctk.CTk):
                 self.canvas.draw_idle()
             except Exception:
                 pass
-        self.after(400, self._refresh_plots)
+        self.after(250, self._refresh_plots)
 
     # ---------------------------------------------------------------- Log area
     def _build_log_area(self, parent):
@@ -497,6 +504,9 @@ class AntiSELDashboard(ctk.CTk):
             self._log(f"File di run: {prefix}_*.csv", "info")
             self._log_event("CONNECT", f"{HOST}:{PORT}")
             self.slow_t.clear(); self.slow_i.clear(); self.slow_thr.clear(); self.slow_t0 = None
+            self._current_offset_mA = 0.0
+            self._current_offset_samples = 0
+            self._current_offset_ready = False
             # Protocollo v5: invia la config elettrica/parametrica al firmware
             self._send_config()
         except Exception as e:
@@ -605,6 +615,17 @@ class AntiSELDashboard(ctk.CTk):
                                         i_mA = float(self._counts_to_mA(adc_raw))
                                     except ValueError:
                                         i_mA = 0.0
+                                if not self._current_offset_ready:
+                                    if self._current_offset_samples < 5:
+                                        self._current_offset_mA += i_mA
+                                        self._current_offset_samples += 1
+                                        if self._current_offset_samples >= 5:
+                                            self._current_offset_mA /= 5.0
+                                            self._current_offset_ready = True
+                                    else:
+                                        self._current_offset_ready = True
+                                if self._current_offset_ready:
+                                    i_mA = max(0.0, i_mA - self._current_offset_mA)
                                 if "THR_MA" in fields:
                                     thr = float(fields["THR_MA"])
                                 else:
@@ -673,6 +694,11 @@ class AntiSELDashboard(ctk.CTk):
                                 idx = int(parts[0]); adc_raw = int(parts[1])
                                 time_us = idx * 1e6 / self.trace_fs
                                 i_mA = self._counts_to_mA(adc_raw)
+                                if self._current_offset_ready:
+                                    try:
+                                        i_mA = max(0.0, float(i_mA) - self._current_offset_mA)
+                                    except Exception:
+                                        pass
                                 try:
                                     self._trace_acc.append((time_us, float(i_mA)))
                                 except ValueError:
@@ -739,7 +765,7 @@ class AntiSELDashboard(ctk.CTk):
                     self._log(msg, "err")
         except queue.Empty:
             pass
-        self.after(40, self._poll_rx_queue)
+        self.after(50, self._poll_rx_queue)
 
     # ============================================================ HELPERS
     @staticmethod
@@ -834,25 +860,43 @@ class AntiSELDashboard(ctk.CTk):
 
     # ================================================================== LOG
     def _log(self, msg, tag="info"):
-        self.after(0, lambda: self._log_main_thread(msg, tag))
+        self._pending_log_lines.append((msg, tag))
+        if not self._log_flush_scheduled:
+            self._log_flush_scheduled = True
+            self.after(0, self._flush_log_batch)
 
-    def _log_main_thread(self, msg, tag):
-        ts = time.strftime("%H:%M:%S")
+    def _flush_log_batch(self):
+        self._log_flush_scheduled = False
+        if not self._pending_log_lines:
+            return
+        lines = self._pending_log_lines
+        self._pending_log_lines = []
         self.log.configure(state="normal")
-        self.log.insert("end", f"[{ts}] {msg}\n", tag)
+        for msg, tag in lines:
+            ts = time.strftime("%H:%M:%S")
+            self.log.insert("end", f"[{ts}] {msg}\n", tag)
         self.log.see("end")
         self.log.configure(state="disabled")
 
     def _log_slow(self, msg, tag=None):
-        self.after(0, lambda: self._log_slow_main_thread(msg, tag))
+        self._pending_slow_log_lines.append((msg, tag))
+        if not self._slow_log_flush_scheduled:
+            self._slow_log_flush_scheduled = True
+            self.after(0, self._flush_slow_log_batch)
 
-    def _log_slow_main_thread(self, msg, tag):
-        ts = time.strftime("%H:%M:%S")
+    def _flush_slow_log_batch(self):
+        self._slow_log_flush_scheduled = False
+        if not self._pending_slow_log_lines:
+            return
+        lines = self._pending_slow_log_lines
+        self._pending_slow_log_lines = []
         self.slow_log.configure(state="normal")
-        if tag:
-            self.slow_log.insert("end", f"[{ts}] {msg}\n", tag)
-        else:
-            self.slow_log.insert("end", f"[{ts}] {msg}\n")
+        for msg, tag in lines:
+            ts = time.strftime("%H:%M:%S")
+            if tag:
+                self.slow_log.insert("end", f"[{ts}] {msg}\n", tag)
+            else:
+                self.slow_log.insert("end", f"[{ts}] {msg}\n")
         self.slow_log.see("end")
         self.slow_log.configure(state="disabled")
 
