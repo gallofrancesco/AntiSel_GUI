@@ -167,6 +167,29 @@ lunghezza e formato.
 
 ---
 
+## 6bis. Link PID CTRL / RTU (placeholder — TBD)
+
+**Non fa parte del protocollo Nucleo.** È una connessione TCP separata
+(`RTU_HOST:RTU_PORT`, default `192.168.1.101:7756`), introdotta come
+placeholder per il PID CTRL e l'RTU di Figura 1 della descrizione di sistema
+(§8.4: IP, porta e protocollo reali sono ancora un punto aperto).
+
+Formato ipotizzato, in stile testuale coerente col resto del documento
+(`key=value` separati da spazio), da sostituire quando le specifiche reali
+(o Modbus TCP) saranno definite:
+
+| Comando GUI → dispositivo | Risposta attesa |
+|---|---|
+| `GET TEMP` | `TEMP=<°C>` |
+| `GET PID` | `PWM=<%> STATE=<nome>` |
+| `SET SETPOINT_C <°C>` | `OK SETPOINT_C=<°C>` (non ancora validata dalla GUI) |
+
+La GUI interroga `GET TEMP`/`GET PID` una volta al secondo dopo la
+connessione. Il parsing lato dashboard è in `_rtu_send_cmd` / `_poll_rtu_queue`
+in `antisel_dashboard_eth.py`.
+
+---
+
 ## 7. Sequenza tipica alla connessione (lato GUI)
 
 ```

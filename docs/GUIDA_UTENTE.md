@@ -42,13 +42,14 @@ python antisel_dashboard_eth.py
 
 ## 4. Layout dell'interfaccia
 
-La finestra è divisa in tre colonne più un'area di log in basso:
+La finestra è divisa in quattro colonne più un'area di log in basso:
 
 | Colonna | Contenuto |
 |---|---|
-| **Sinistra** | Stato connessione, pulsante Connetti/Disconnetti, metriche RTT/TX/RX, test di rete (PING, STATUS, Ping Loop), campo comando libero |
+| **Sinistra** | Stato connessione Nucleo, pulsante Connetti/Disconnetti, metriche RTT/TX/RX, test di rete (PING, STATUS, Ping Loop), campo comando libero |
 | **Centro** | Azioni DUT, gestione riarmo latch INA301, soglia `I_TH`, tempistiche `T_HOLD`/`T_ON`, parametri hardware (`R_SHUNT`, `GAIN`), identificativi run (per i nomi dei CSV), pannello di stato |
-| **Destra** | Grafico continuo (log 10 Hz) e grafico dell'ultima traccia evento ad alta risoluzione |
+| **Grafici** | Grafico continuo (log 10 Hz) e grafico dell'ultima traccia evento ad alta risoluzione |
+| **Destra** | Pannello **PID CTRL / RTU** — placeholder per il controllo temperatura (Figura 1 della descrizione di sistema): connessione TCP separata, temperatura DUT, PWM/stato PID, setpoint (vedi §4.10) |
 | **In basso** | Log cronologico colorato di tutte le operazioni |
 
 ### 4.1 Connessione
@@ -126,6 +127,32 @@ l'acquisizione per ottenere nomi file riconoscibili.
   (`TRACE_START`…`TRACE_END`) con overlay sul grafico continuo nel punto
   temporale corretto.
 
+### 4.10 Pannello PID CTRL / RTU (placeholder)
+
+La descrizione di sistema (Figura 1) prevede, oltre alla AntiSEL Board, un
+**PID CTRL** che pilota il PWM dell'Heat System della Irradiation Board e un
+**RTU** che legge la temperatura del DUT e la fornisce a PID e PC. Questi due
+dispositivi non sono ancora disponibili in laboratorio (IP, porta e
+protocollo sono un punto aperto, §8.4 della descrizione di sistema): il
+pannello nella colonna destra è quindi un **placeholder**, pronto per essere
+agganciato quando l'hardware sarà definito.
+
+- **IP / Porta**: indirizzo TCP del link RTU/PID, indipendente da quello
+  della Nucleo (default `192.168.1.101:7756`, costanti `RTU_HOST`/`RTU_PORT`
+  in cima al file).
+- **Connetti/Disconnetti**: apre/chiude una connessione TCP separata da
+  quella della Nucleo (thread RX dedicato, non interferisce col resto della
+  dashboard).
+- **T_DUT / PWM PID / Stato PID**: aggiornati automaticamente una volta al
+  secondo tramite un polling `GET TEMP` / `GET PID` (protocollo testuale
+  provvisorio, in stile `GET`/`SET`/`OK` coerente con quello della Nucleo).
+- **Setpoint**: campo in °C (default 85.0, in linea con `T_DUT` richiesto da
+  AD2 §3); **Set setpoint** invia `SET SETPOINT_C <valore>`.
+
+Quando le specifiche reali di PID CTRL e RTU saranno disponibili (protocollo
+testuale, Modbus TCP o altro), è sufficiente aggiornare il parsing in
+`_rtu_send_cmd`/`_poll_rtu_queue` senza modificare il resto della dashboard.
+
 ## 5. File generati (CSV)
 
 Durante una sessione con logging attivo, la dashboard scrive nella
@@ -171,3 +198,6 @@ Sintassi completa, range di validazione e formati di telemetria asincrona
 3. Controllare il log applicazione (area in basso, righe rosse = errori).
 4. Se il DUT risulta bloccato in `FAULT`/spegnimento permanente, usare
    **ACK FAULT** o **RESET**.
+5. Il pannello **PID CTRL / RTU** è un placeholder (§4.10): se non compaiono
+   letture non è un malfunzionamento, ma la semplice assenza del dispositivo
+   reale (protocollo/IP ancora da definire).

@@ -27,6 +27,16 @@ HOST    = "192.168.1.100"
 PORT    = 7755
 TIMEOUT = 3.0
 
+# Collegamento RTU/PID (Figura 1, rif. RD04): dispositivi non ancora
+# disponibili in laboratorio, IP/porta e protocollo sono TBD (§8.4).
+# Placeholder in stile testuale GET/SET/OK, coerente con quello della Nucleo,
+# pensato per essere sostituito quando le specifiche reali (o Modbus TCP)
+# saranno definite.
+RTU_HOST    = "192.168.1.101"
+RTU_PORT    = 7756
+RTU_TIMEOUT = 3.0
+RTU_POLL_S  = 1.0
+
 DAC_MAX_COUNTS = 4095    # DAC della Nucleo: 12 bit
 ADC_MAX_COUNTS = 65535   # ADC della Nucleo: 16 bit (ADC_RESOLUTION_16B)
 DEFAULT_FS     = 100000  # sample rate ADC [Sa/s], sovrascritto dall'header traccia
@@ -52,8 +62,8 @@ class AntiSELDashboard(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title("AntiSEL Dashboard")
-        self.geometry("1560x860")
-        self.minsize(1280, 720)
+        self.geometry("1780x860")
+        self.minsize(1440, 720)
 
         # Stato
         self.sock             = None
@@ -74,6 +84,13 @@ class AntiSELDashboard(ctk.CTk):
         self.rx_count = 0
         self.cur_dac  = 2048   # ultimo valore DAC (soglia attiva)
 
+        # Stato link RTU/PID (Figura 1, placeholder — vedi costanti RTU_*)
+        self.rtu_sock        = None
+        self.rtu_connected   = False
+        self.rtu_rx_queue    = queue.Queue()
+        self.rtu_rx_thread   = None
+        self.rtu_poll_active = False
+
         # Variabili
         self.r_shunt  = tk.StringVar(value="1.0")
         self.ina_gain = tk.StringVar(value="20")
@@ -85,6 +102,11 @@ class AntiSELDashboard(ctk.CTk):
         self.run_id = tk.StringVar(value="RUN01")
         self.retry_max = tk.StringVar(value="3")
         self.t_clear   = tk.StringVar(value="30")
+
+        # Variabili link RTU/PID
+        self.rtu_host_val  = tk.StringVar(value=RTU_HOST)
+        self.rtu_port_val  = tk.StringVar(value=str(RTU_PORT))
+        self.setpoint_val  = tk.StringVar(value="85.0")   # setpoint T_DUT [°C] (rif. AD2 §3)
 
         # Buffer grafici
         self.slow_t   = deque(maxlen=600)
@@ -106,13 +128,16 @@ class AntiSELDashboard(ctk.CTk):
 
         self._build_ui()
         self.after(40, self._poll_rx_queue)
+        self.after(40, self._poll_rtu_queue)
         self.after(400, self._refresh_plots)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ================================================================ UI
     def _build_ui(self):
-        self.grid_columnconfigure(0, weight=0, minsize=215)   # rete
-        self.grid_columnconfigure(1, weight=2, minsize=500)   # controlli (si allarga)
+        self.grid_columnconfigure(0, weight=0, minsize=215)   # rete Nucleo
+        self.grid_columnconfigure(1, weight=2, minsize=500)   # controlli DUT/AntiSEL (si allarga)
         self.grid_columnconfigure(2, weight=3, minsize=420)   # grafici (espande)
+        self.grid_columnconfigure(3, weight=0, minsize=215)   # RTU/PID (temperatura)
         self.grid_rowconfigure(0, weight=3)
         self.grid_rowconfigure(1, weight=1)                   # log
 
@@ -121,14 +146,17 @@ class AntiSELDashboard(ctk.CTk):
         self.col_mid   = ctk.CTkScrollableFrame(self, label_text="Controlli AntiSEL")
         self.col_mid.grid(row=0, column=1, sticky="nsew", padx=(6, 3), pady=6)
         self.col_right = ctk.CTkFrame(self, fg_color="transparent")
-        self.col_right.grid(row=0, column=2, sticky="nsew", padx=(3, 6), pady=6)
+        self.col_right.grid(row=0, column=2, sticky="nsew", padx=(3, 3), pady=6)
+        self.col_rtu   = ctk.CTkFrame(self, width=230, corner_radius=0)
+        self.col_rtu.grid(row=0, column=3, sticky="nsew")
 
         self._build_left(self.col_left)
         self._build_center(self.col_mid)
         self._build_charts(self.col_right)
+        self._build_rtu_panel(self.col_rtu)
 
         self.log_frame = ctk.CTkFrame(self)
-        self.log_frame.grid(row=1, column=0, columnspan=3, sticky="nsew", padx=6, pady=(0, 6))
+        self.log_frame.grid(row=1, column=0, columnspan=4, sticky="nsew", padx=6, pady=(0, 6))
         self._build_log_area(self.log_frame)
 
     def _add_metric(self, parent, row, label, value):
@@ -175,6 +203,43 @@ class AntiSELDashboard(ctk.CTk):
         self.entry_cmd.grid(row=0, column=0, pady=(0, 5), sticky="ew")
         self.entry_cmd.bind("<Return>", lambda e: self._send_manual())
         ctk.CTkButton(cf, text="Invia", command=self._send_manual).grid(row=1, column=0, sticky="ew")
+
+    # ---------------------------------------------------------------- Colonna DX (RTU/PID)
+    def _build_rtu_panel(self, p):
+        p.grid_columnconfigure(0, weight=1)
+        p.grid_rowconfigure(9, weight=1)
+
+        ctk.CTkLabel(p, text="PID CTRL\n+ RTU", font=ctk.CTkFont(size=22, weight="bold")).grid(row=0, column=0, padx=20, pady=(18, 8))
+        ctk.CTkLabel(p, text="(placeholder — TBD)", font=ctk.CTkFont(size=10), text_color="gray50").grid(row=1, column=0, padx=20)
+
+        self.lbl_rtu_status = ctk.CTkLabel(p, text="● non connesso", text_color="red", font=ctk.CTkFont(weight="bold"))
+        self.lbl_rtu_status.grid(row=2, column=0, padx=20, pady=(10, 4))
+
+        addr = ctk.CTkFrame(p, fg_color="transparent")
+        addr.grid(row=3, column=0, padx=15, pady=2, sticky="ew")
+        ctk.CTkLabel(addr, text="IP:").grid(row=0, column=0, padx=(0, 3), sticky="e")
+        ctk.CTkEntry(addr, textvariable=self.rtu_host_val, width=110).grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(addr, text="Porta:").grid(row=1, column=0, padx=(0, 3), pady=(4, 0), sticky="e")
+        ctk.CTkEntry(addr, textvariable=self.rtu_port_val, width=60).grid(row=1, column=1, pady=(4, 0), sticky="w")
+
+        self.btn_rtu_conn = ctk.CTkButton(p, text="Connetti", command=self._rtu_toggle_connection)
+        self.btn_rtu_conn.grid(row=4, column=0, padx=20, pady=12)
+
+        mf = ctk.CTkFrame(p)
+        mf.grid(row=5, column=0, padx=15, pady=8, sticky="ew")
+        self.metric_temp      = self._add_metric(mf, 0, "T_DUT [°C]", "—")
+        self.metric_pwm       = self._add_metric(mf, 1, "PWM PID [%]", "—")
+        self.metric_pid_state = self._add_metric(mf, 2, "Stato PID", "—")
+
+        ctk.CTkLabel(p, text="Setpoint", font=ctk.CTkFont(weight="bold")).grid(row=6, column=0, padx=20, pady=(14, 4))
+        sp = ctk.CTkFrame(p, fg_color="transparent")
+        sp.grid(row=7, column=0, padx=15, pady=2, sticky="ew")
+        sp.grid_columnconfigure((0, 1), weight=1)
+        ctk.CTkEntry(sp, textvariable=self.setpoint_val, width=70, justify="center").grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        ctk.CTkLabel(sp, text="°C").grid(row=0, column=1, sticky="w")
+        ctk.CTkButton(p, text="Set setpoint", command=self._rtu_set_setpoint).grid(row=8, column=0, padx=20, pady=(6, 16), sticky="ew")
+
+        # spacer row 9
 
     # ---------------------------------------------------------------- Colonna CENTRO
     def _build_center(self, p):
@@ -542,6 +607,137 @@ class AntiSELDashboard(ctk.CTk):
         self.btn_conn.configure(text="Connetti", fg_color=["#3B8ED0", "#1F6AA5"], hover_color=["#36719F", "#144870"])
         self.btn_ping_loop.configure(fg_color="transparent")
         self._log("Disconnesso.", "info")
+
+    # ============================================================ RTU/PID (Figura 1, placeholder)
+    def _rtu_toggle_connection(self):
+        if self.rtu_connected:
+            self._rtu_disconnect()
+        else:
+            threading.Thread(target=self._rtu_connect, daemon=True).start()
+
+    def _rtu_connect(self):
+        try:
+            host = self.rtu_host_val.get().strip()
+            port = int(self.rtu_port_val.get())
+        except ValueError:
+            self.rtu_rx_queue.put(("err", "RTU/PID: IP o porta non validi."))
+            return
+        self._log(f"RTU/PID: connessione a {host}:{port}...", "info")
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(RTU_TIMEOUT)
+            s.connect((host, port))
+            s.settimeout(None)
+            self.rtu_sock = s
+            self.rtu_connected = True
+            self.after(0, self._rtu_on_connected)
+            self.rtu_rx_thread = threading.Thread(target=self._rtu_rx_loop, daemon=True)
+            self.rtu_rx_thread.start()
+            self.rtu_poll_active = True
+            threading.Thread(target=self._rtu_poll_loop, daemon=True).start()
+        except Exception as e:
+            self.rtu_rx_queue.put(("err", f"RTU/PID: connessione fallita: {e}"))
+
+    def _rtu_disconnect(self):
+        self.rtu_poll_active = False
+        self.rtu_connected   = False
+        if self.rtu_sock:
+            try:
+                self.rtu_sock.shutdown(socket.SHUT_RDWR)
+                self.rtu_sock.close()
+            except Exception:
+                pass
+            self.rtu_sock = None
+        self._rtu_on_disconnected()
+
+    def _rtu_on_connected(self):
+        self.lbl_rtu_status.configure(text="● connesso", text_color="green")
+        self.btn_rtu_conn.configure(text="Disconnetti RTU/PID", fg_color="red", hover_color="darkred")
+        self._log("RTU/PID: connesso.", "info")
+
+    def _rtu_on_disconnected(self):
+        self.lbl_rtu_status.configure(text="● non connesso", text_color="red")
+        self.btn_rtu_conn.configure(text="Connetti RTU/PID", fg_color=["#3B8ED0", "#1F6AA5"], hover_color=["#36719F", "#144870"])
+        self.metric_temp.configure(text="—")
+        self.metric_pwm.configure(text="—")
+        self.metric_pid_state.configure(text="—")
+        self._log("RTU/PID: disconnesso.", "info")
+
+    def _rtu_rx_loop(self):
+        try:
+            buffer = b""
+            while self.rtu_connected:
+                chunk = self.rtu_sock.recv(256)
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    line = line.decode().strip()
+                    if line:
+                        self.rtu_rx_queue.put(("rx", line))
+        except Exception:
+            pass
+        finally:
+            if self.rtu_connected:
+                self.rtu_rx_queue.put(("err", "RTU/PID: connessione persa."))
+                self.rtu_connected = False
+                self.after(0, self._rtu_on_disconnected)
+
+    def _rtu_send_cmd(self, cmd):
+        if not self.rtu_connected or not self.rtu_sock:
+            return
+        try:
+            self.rtu_sock.sendall((cmd + "\r\n").encode())
+            self._log(f"RTU/PID -> {cmd}", "tx")
+        except Exception as e:
+            self._log(f"RTU/PID errore TX: {e}", "err")
+
+    def _rtu_set_setpoint(self):
+        try:
+            sp = float(self.setpoint_val.get())
+        except ValueError:
+            return
+        self._rtu_send_cmd(f"SET SETPOINT_C {sp:.1f}")
+
+    def _rtu_poll_loop(self):
+        """Interrogazione periodica di temperatura e stato PID (placeholder)."""
+        while self.rtu_poll_active and self.rtu_connected:
+            self._rtu_send_cmd("GET TEMP")
+            self._rtu_send_cmd("GET PID")
+            time.sleep(RTU_POLL_S)
+
+    def _poll_rtu_queue(self):
+        try:
+            while True:
+                kind, msg = self.rtu_rx_queue.get_nowait()
+                if kind == "rx":
+                    fields = self._parse_kv(msg)
+                    if "TEMP" in fields:
+                        try:
+                            self.metric_temp.configure(text=f"{float(fields['TEMP']):.1f}")
+                        except ValueError:
+                            pass
+                    if "PWM" in fields:
+                        try:
+                            self.metric_pwm.configure(text=f"{float(fields['PWM']):.1f}")
+                        except ValueError:
+                            pass
+                    if "STATE" in fields:
+                        self.metric_pid_state.configure(text=fields["STATE"])
+                    self._log(f"RTU/PID <- {msg}", "rx")
+                elif kind == "err":
+                    self._log(msg, "err")
+        except queue.Empty:
+            pass
+        self.after(40, self._poll_rtu_queue)
+
+    def _on_close(self):
+        if self.connected:
+            self._disconnect()
+        if self.rtu_connected:
+            self._rtu_disconnect()
+        self.destroy()
 
     # ================================================================== I/O
     def _rx_loop(self):
