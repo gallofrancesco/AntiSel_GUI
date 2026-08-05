@@ -49,6 +49,28 @@ SEL_RETRY_MAX = 3
 
 I_TH_MIN, I_TH_MAX = 1.0, 50.0   # range soglia (R-02)
 
+# ---------------------------------------------------------------- Design tokens
+# Palette semantica dei pulsanti/stati, usata ovunque al posto di colori
+# letterali sparsi, per coerenza visiva fra le sezioni.
+CLR_OK             = "#15803d"
+CLR_OK_HOVER       = "#0f5c2c"
+CLR_DANGER         = "#dc2626"
+CLR_DANGER_HOVER   = "#a91d1d"
+CLR_WARN           = "#b45309"
+CLR_WARN_HOVER     = "#8a3d06"
+CLR_NEUTRAL        = "#52525b"
+CLR_NEUTRAL_HOVER  = "#3f3f46"
+CLR_MUTED          = "gray45"
+
+# Accenti/tinte delle card per sezione: rosso = protezione/sicurezza DUT
+# (azioni critiche), blu = configurazione, grigio = informazioni/stato.
+CLR_ACCENT_PROTECT = "#dc2626"
+CLR_ACCENT_CONFIG  = "#1f6aa5"
+CLR_ACCENT_INFO    = "#52525b"
+CLR_CARD_PROTECT   = ("#fdf1f1", "#3a1f1f")
+CLR_CARD_CONFIG    = ("#f2f7fc", "#1c2733")
+CLR_CARD_INFO      = ("#f2f2f3", "#232326")
+
 
 def voltage_to_counts(v, vref=VREF):
     return int(max(0, min(DAC_MAX_COUNTS, round(v / vref * DAC_MAX_COUNTS))))
@@ -62,8 +84,21 @@ class AntiSELDashboard(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title("AntiSEL Dashboard")
-        self.geometry("1780x860")
-        self.minsize(1440, 720)
+        self.minsize(1560, 780)
+        # Dimensione iniziale: NON usare winfo_screenwidth/height() per il
+        # 100% del calcolo — su setup multi-monitor Tkinter riporta le
+        # dimensioni del desktop virtuale COMBINATO (tutti i monitor
+        # insieme), non del singolo schermo su cui la finestra apparira'.
+        # Usarlo per dimensionare la finestra puo' produrla piu' alta di
+        # qualunque monitor reale, spingendo l'area di log fuori dallo
+        # schermo. Si usa quindi un tetto massimo assoluto sicuro (adatto a
+        # un monitor singolo tipico) e si lascia decidere la posizione al
+        # window manager, invece di calcolarla sullo schermo virtuale.
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        win_w = max(1560, min(int(screen_w * 0.9), 1850))
+        win_h = max(780, min(int(screen_h * 0.85), 980))
+        self.geometry(f"{win_w}x{win_h}")
 
         # Stato
         self.sock             = None
@@ -126,6 +161,12 @@ class AntiSELDashboard(ctk.CTk):
         self._plot_dirty = False
         self.plot_paused = False
 
+        # Buffer grafico temperatura (link RTU/PID, placeholder)
+        self.rtu_t    = deque(maxlen=600)
+        self.rtu_temp = deque(maxlen=600)
+        self.rtu_sp   = deque(maxlen=600)
+        self.rtu_t0   = None
+
         self._build_ui()
         self.after(40, self._poll_rx_queue)
         self.after(40, self._poll_rtu_queue)
@@ -136,19 +177,24 @@ class AntiSELDashboard(ctk.CTk):
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=0, minsize=215)   # rete Nucleo
         self.grid_columnconfigure(1, weight=2, minsize=500)   # controlli DUT/AntiSEL (si allarga)
-        self.grid_columnconfigure(2, weight=3, minsize=420)   # grafici (espande)
-        self.grid_columnconfigure(3, weight=0, minsize=215)   # RTU/PID (temperatura)
+        # uniform="charts": forza colonna grafici e colonna RTU/PID alla
+        # stessa larghezza esatta, indipendentemente da quanto richiedono i
+        # rispettivi contenuti (altrimenti la larghezza "naturale" del
+        # canvas matplotlib in col. 3 vince e sbilancia le due colonne).
+        self.grid_columnconfigure(2, weight=2, minsize=380, uniform="charts")   # grafici corrente/traccia
+        self.grid_columnconfigure(3, weight=2, minsize=380, uniform="charts")   # RTU/PID + temperatura
         self.grid_rowconfigure(0, weight=3)
         self.grid_rowconfigure(1, weight=1)                   # log
 
-        self.col_left  = ctk.CTkFrame(self, width=230, corner_radius=0)
+        self.col_left  = ctk.CTkFrame(self, width=230, corner_radius=0, fg_color=("gray90", "gray14"))
         self.col_left.grid(row=0, column=0, sticky="nsew")
-        self.col_mid   = ctk.CTkScrollableFrame(self, label_text="Controlli AntiSEL")
+        self.col_mid   = ctk.CTkScrollableFrame(self, label_text="Controlli AntiSEL",
+                                                 label_font=ctk.CTkFont(size=14, weight="bold"))
         self.col_mid.grid(row=0, column=1, sticky="nsew", padx=(6, 3), pady=6)
         self.col_right = ctk.CTkFrame(self, fg_color="transparent")
         self.col_right.grid(row=0, column=2, sticky="nsew", padx=(3, 3), pady=6)
-        self.col_rtu   = ctk.CTkFrame(self, width=230, corner_radius=0)
-        self.col_rtu.grid(row=0, column=3, sticky="nsew")
+        self.col_rtu   = ctk.CTkFrame(self, width=380, corner_radius=0, fg_color="transparent")
+        self.col_rtu.grid(row=0, column=3, sticky="nsew", pady=6)
 
         self._build_left(self.col_left)
         self._build_center(self.col_mid)
@@ -159,10 +205,13 @@ class AntiSELDashboard(ctk.CTk):
         self.log_frame.grid(row=1, column=0, columnspan=4, sticky="nsew", padx=6, pady=(0, 6))
         self._build_log_area(self.log_frame)
 
-    def _add_metric(self, parent, row, label, value):
-        ctk.CTkLabel(parent, text=label, font=ctk.CTkFont(size=11, weight="bold")).grid(row=row, column=0, padx=10, pady=2, sticky="e")
+    def _add_metric(self, parent, row, label, value, col=0):
+        """col seleziona la coppia di colonne (label, valore): col=0 -> 0/1,
+        col=1 -> 2/3, ecc. Permette di affiancare piu' metriche sulla stessa
+        riga invece di impilarle (ogni riga in piu' costa altezza preziosa)."""
+        ctk.CTkLabel(parent, text=label, font=ctk.CTkFont(size=11, weight="bold")).grid(row=row, column=col * 2, padx=10, pady=2, sticky="e")
         val_lbl = ctk.CTkLabel(parent, text=value, font=ctk.CTkFont(size=12))
-        val_lbl.grid(row=row, column=1, padx=10, pady=2, sticky="w")
+        val_lbl.grid(row=row, column=col * 2 + 1, padx=10, pady=2, sticky="w")
         return val_lbl
 
     # ---------------------------------------------------------------- Colonna SX
@@ -172,14 +221,15 @@ class AntiSELDashboard(ctk.CTk):
 
         ctk.CTkLabel(p, text="AntiSEL\nControl", font=ctk.CTkFont(size=22, weight="bold")).grid(row=0, column=0, padx=20, pady=(18, 8))
 
-        self.lbl_status = ctk.CTkLabel(p, text="● DISCONNESSO", text_color="red", font=ctk.CTkFont(weight="bold"))
-        self.lbl_status.grid(row=1, column=0, padx=20, pady=4)
-        self.lbl_target = ctk.CTkLabel(p, text=f"{HOST}:{PORT}")
-        self.lbl_target.grid(row=2, column=0, padx=20)
+        self.lbl_status = ctk.CTkLabel(p, text="● DISCONNESSO", text_color="white", fg_color=CLR_DANGER,
+                                        corner_radius=6, font=ctk.CTkFont(size=13, weight="bold"))
+        self.lbl_status.grid(row=1, column=0, padx=20, pady=4, sticky="ew")
+        self.lbl_target = ctk.CTkLabel(p, text=f"{HOST}:{PORT}", text_color=CLR_MUTED)
+        self.lbl_target.grid(row=2, column=0, padx=20, pady=(2, 0))
         self.btn_conn = ctk.CTkButton(p, text="Connetti", command=self._toggle_connection)
         self.btn_conn.grid(row=3, column=0, padx=20, pady=12)
 
-        mf = ctk.CTkFrame(p)
+        mf = ctk.CTkFrame(p, fg_color=("white", "gray20"), corner_radius=8)
         mf.grid(row=4, column=0, padx=15, pady=8, sticky="ew")
         self.metric_ping = self._add_metric(mf, 0, "RTT ping", "— ms")
         self.metric_tx   = self._add_metric(mf, 1, "TX", "0")
@@ -207,39 +257,78 @@ class AntiSELDashboard(ctk.CTk):
     # ---------------------------------------------------------------- Colonna DX (RTU/PID)
     def _build_rtu_panel(self, p):
         p.grid_columnconfigure(0, weight=1)
-        p.grid_rowconfigure(9, weight=1)
+        p.grid_rowconfigure(1, weight=1)   # stessa proporzione di col_right riga 1
 
-        ctk.CTkLabel(p, text="PID CTRL\n+ RTU", font=ctk.CTkFont(size=22, weight="bold")).grid(row=0, column=0, padx=20, pady=(18, 8))
-        ctk.CTkLabel(p, text="(placeholder — TBD)", font=ctk.CTkFont(size=10), text_color="gray50").grid(row=1, column=0, padx=20)
+        # --- Grafico temperatura: stessa struttura (toolbar + canvas) e
+        # stesso padding della colonna grafici, cosi' il canvas risulta
+        # allineato in alto con "Corrente DUT" (col_right, riga 0/1). ---
+        toolbar = ctk.CTkFrame(p, fg_color="transparent")
+        toolbar.grid(row=0, column=0, sticky="ew", padx=6, pady=(0, 2))
+        ctk.CTkLabel(toolbar, text="Temperatura", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=(2, 0))
 
-        self.lbl_rtu_status = ctk.CTkLabel(p, text="● non connesso", text_color="red", font=ctk.CTkFont(weight="bold"))
-        self.lbl_rtu_status.grid(row=2, column=0, padx=20, pady=(10, 4))
+        # body: chart (riga 0) + resto dei controlli RTU/PID (riga 1), pesi
+        # uguali cosi' il grafico occupa esattamente META' dell'altezza
+        # disponibile in questa riga — la stessa altezza di ciascuno dei due
+        # subplot impilati in col_right (che condividono la stessa riga 1).
+        body = ctk.CTkFrame(p, fg_color="transparent")
+        body.grid(row=1, column=0, sticky="nsew")
+        body.grid_columnconfigure(0, weight=1)
+        # uniform="rtu_split": stessa logica di cui sopra, forza il grafico
+        # (riga 0) e il resto dei controlli (riga 1) alla stessa altezza,
+        # cosi' il grafico risulta esattamente meta' della riga — la stessa
+        # altezza di ciascuno dei due subplot impilati in col_right.
+        body.grid_rowconfigure(0, weight=1, uniform="rtu_split")
+        body.grid_rowconfigure(1, weight=1, uniform="rtu_split")
 
-        addr = ctk.CTkFrame(p, fg_color="transparent")
-        addr.grid(row=3, column=0, padx=15, pady=2, sticky="ew")
+        self.fig_rtu_temp = Figure(figsize=(3.6, 3.0), dpi=100)
+        self.fig_rtu_temp.subplots_adjust(left=0.18, right=0.95, top=0.90, bottom=0.16)
+        self.ax_temp = self.fig_rtu_temp.add_subplot(111)
+        self.ax_temp.set_title("T_DUT (RTU/PID)", fontsize=9)
+        self.ax_temp.set_xlabel("t [s]", fontsize=7)
+        self.ax_temp.set_ylabel("T [°C]", fontsize=7)
+        self.ax_temp.grid(True, alpha=0.3)
+        self.ax_temp.tick_params(labelsize=7)
+        (self.line_temp,) = self.ax_temp.plot([], [], color="#c2410c", lw=1.2, label="T_DUT")
+        (self.line_setpoint,) = self.ax_temp.plot([], [], color="#666666", lw=1.0, ls="--", alpha=0.8, label="SP")
+        self.ax_temp.legend(loc="upper right", fontsize=6)
+
+        self.canvas_rtu_temp = FigureCanvasTkAgg(self.fig_rtu_temp, master=body)
+        self.canvas_rtu_temp.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.canvas_rtu_temp.draw()
+
+        ctrl = ctk.CTkFrame(body, fg_color="transparent")
+        ctrl.grid(row=1, column=0, sticky="nsew")
+        ctrl.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(ctrl, text="PID CTRL + RTU", font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=0, padx=15, pady=(6, 0))
+        ctk.CTkLabel(ctrl, text="(placeholder — TBD)", font=ctk.CTkFont(size=10), text_color="gray50").grid(row=1, column=0, padx=15)
+
+        self.lbl_rtu_status = ctk.CTkLabel(ctrl, text="● non connesso", text_color="white", fg_color=CLR_DANGER,
+                                           corner_radius=6, font=ctk.CTkFont(size=12, weight="bold"))
+        self.lbl_rtu_status.grid(row=2, column=0, padx=15, pady=(6, 3), sticky="ew")
+
+        addr = ctk.CTkFrame(ctrl, fg_color="transparent")
+        addr.grid(row=3, column=0, padx=15, pady=1, sticky="ew")
         ctk.CTkLabel(addr, text="IP:").grid(row=0, column=0, padx=(0, 3), sticky="e")
-        ctk.CTkEntry(addr, textvariable=self.rtu_host_val, width=110).grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(addr, text="Porta:").grid(row=1, column=0, padx=(0, 3), pady=(4, 0), sticky="e")
-        ctk.CTkEntry(addr, textvariable=self.rtu_port_val, width=60).grid(row=1, column=1, pady=(4, 0), sticky="w")
+        ctk.CTkEntry(addr, textvariable=self.rtu_host_val, width=100).grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(addr, text="Porta:").grid(row=1, column=0, padx=(0, 3), sticky="e")
+        ctk.CTkEntry(addr, textvariable=self.rtu_port_val, width=60).grid(row=1, column=1, sticky="w")
 
-        self.btn_rtu_conn = ctk.CTkButton(p, text="Connetti", command=self._rtu_toggle_connection)
-        self.btn_rtu_conn.grid(row=4, column=0, padx=20, pady=12)
+        self.btn_rtu_conn = ctk.CTkButton(ctrl, text="Connetti", command=self._rtu_toggle_connection)
+        self.btn_rtu_conn.grid(row=4, column=0, padx=15, pady=6)
 
-        mf = ctk.CTkFrame(p)
-        mf.grid(row=5, column=0, padx=15, pady=8, sticky="ew")
+        mf = ctk.CTkFrame(ctrl, fg_color=("white", "gray20"), corner_radius=8)
+        mf.grid(row=5, column=0, padx=15, pady=3, sticky="ew")
         self.metric_temp      = self._add_metric(mf, 0, "T_DUT [°C]", "—")
         self.metric_pwm       = self._add_metric(mf, 1, "PWM PID [%]", "—")
         self.metric_pid_state = self._add_metric(mf, 2, "Stato PID", "—")
 
-        ctk.CTkLabel(p, text="Setpoint", font=ctk.CTkFont(weight="bold")).grid(row=6, column=0, padx=20, pady=(14, 4))
-        sp = ctk.CTkFrame(p, fg_color="transparent")
-        sp.grid(row=7, column=0, padx=15, pady=2, sticky="ew")
+        sp = ctk.CTkFrame(ctrl, fg_color="transparent")
+        sp.grid(row=6, column=0, padx=15, pady=(4, 2), sticky="ew")
         sp.grid_columnconfigure((0, 1), weight=1)
-        ctk.CTkEntry(sp, textvariable=self.setpoint_val, width=70, justify="center").grid(row=0, column=0, padx=(0, 4), sticky="ew")
-        ctk.CTkLabel(sp, text="°C").grid(row=0, column=1, sticky="w")
-        ctk.CTkButton(p, text="Set setpoint", command=self._rtu_set_setpoint).grid(row=8, column=0, padx=20, pady=(6, 16), sticky="ew")
-
-        # spacer row 9
+        ctk.CTkLabel(sp, text="Setpoint (°C):").grid(row=0, column=0, columnspan=2, sticky="w")
+        ctk.CTkEntry(sp, textvariable=self.setpoint_val, width=70, justify="center").grid(row=1, column=0, padx=(0, 4), pady=(2, 0), sticky="ew")
+        ctk.CTkButton(sp, text="Set", width=60, command=self._rtu_set_setpoint).grid(row=1, column=1, pady=(2, 0), sticky="ew")
 
     # ---------------------------------------------------------------- Colonna CENTRO
     def _build_center(self, p):
@@ -247,22 +336,22 @@ class AntiSELDashboard(ctk.CTk):
         r = 0
 
         # --- Azioni DUT ---
-        sec = self._section(p, r, "Azioni DUT"); r += 1
+        sec = self._section(p, r, "Azioni DUT", kind="protect"); r += 1
         act = ctk.CTkFrame(sec, fg_color="transparent"); act.pack(fill="x")
-        self.btn_dut_on = ctk.CTkButton(act, text="DUT ON", fg_color="green", hover_color="darkgreen", command=lambda: self._send_cmd("DUT_ON"))
+        self.btn_dut_on = ctk.CTkButton(act, text="DUT ON", fg_color=CLR_OK, hover_color=CLR_OK_HOVER, command=lambda: self._send_cmd("DUT_ON"))
         self.btn_dut_on.pack(side="left", padx=4, expand=True, fill="x")
-        self.btn_dut_off = ctk.CTkButton(act, text="DUT OFF", fg_color="red", hover_color="darkred", command=lambda: self._send_cmd("DUT_OFF"))
+        self.btn_dut_off = ctk.CTkButton(act, text="DUT OFF", fg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER, command=lambda: self._send_cmd("DUT_OFF"))
         self.btn_dut_off.pack(side="left", padx=4, expand=True, fill="x")
-        self.btn_reset = ctk.CTkButton(act, text="RESET", fg_color="orange", hover_color="darkorange", text_color="black", command=lambda: self._send_cmd("RESET"))
+        self.btn_reset = ctk.CTkButton(act, text="RESET", fg_color=CLR_WARN, hover_color=CLR_WARN_HOVER, command=lambda: self._send_cmd("RESET"))
         self.btn_reset.pack(side="left", padx=4, expand=True, fill="x")
-        self.btn_ack = ctk.CTkButton(act, text="ACK FAULT", fg_color="#8a4500", hover_color="#6a3500", command=lambda: self._send_cmd("ACK FAULT"))
+        self.btn_ack = ctk.CTkButton(act, text="ACK FAULT", fg_color=CLR_WARN_HOVER, hover_color="#5c2a04", command=lambda: self._send_cmd("ACK FAULT"))
         self.btn_ack.pack(side="left", padx=4, expand=True, fill="x")
-        self.lbl_perm_warn = ctk.CTkLabel(sec, text="", text_color="#cc0000", justify="left", font=ctk.CTkFont(size=12, weight="bold"))
+        self.lbl_perm_warn = ctk.CTkLabel(sec, text="", text_color=CLR_DANGER, justify="left", font=ctk.CTkFont(size=12, weight="bold"))
 
         # --- Latch INA301 ---
-        sec = self._section(p, r, "Latch INA301 (policy riarmo)"); r += 1
+        sec = self._section(p, r, "Latch INA301 (policy riarmo)", kind="protect"); r += 1
         lr = ctk.CTkFrame(sec, fg_color="transparent"); lr.pack(fill="x")
-        self.btn_ina_rst = ctk.CTkButton(lr, text="Reset allarme", width=110, fg_color="#b35900", hover_color="#8a4500", command=lambda: self._send_cmd("INA_RST"))
+        self.btn_ina_rst = ctk.CTkButton(lr, text="Reset allarme", width=110, fg_color=CLR_WARN, hover_color=CLR_WARN_HOVER, command=lambda: self._send_cmd("INA_RST"))
         self.btn_ina_rst.pack(side="left", padx=(0, 10))
         ctk.CTkLabel(lr, text="N:").pack(side="left")
         ctk.CTkEntry(lr, textvariable=self.retry_max, width=42).pack(side="left", padx=(2, 4))
@@ -272,7 +361,7 @@ class AntiSELDashboard(ctk.CTk):
         ctk.CTkButton(lr, text="Set", width=40, command=lambda: self._send_cmd(f"SET TCLEAR_MS {self.t_clear.get()}")).pack(side="left")
 
         # --- Soglia I_TH (precisa) ---
-        sec = self._section(p, r, "Soglia di corrente I_TH"); r += 1
+        sec = self._section(p, r, "Soglia di corrente I_TH", kind="config"); r += 1
         ithr = ctk.CTkFrame(sec, fg_color="transparent"); ithr.pack(fill="x")
         ctk.CTkLabel(ithr, text="I_TH (mA):").pack(side="left", padx=(0, 4))
         ctk.CTkButton(ithr, text="−1", width=34, command=lambda: self._ith_step(-1.0)).pack(side="left", padx=1)
@@ -283,16 +372,16 @@ class AntiSELDashboard(ctk.CTk):
         ctk.CTkButton(ithr, text="+1", width=34, command=lambda: self._ith_step(1.0)).pack(side="left", padx=1)
         ctk.CTkButton(ithr, text="Set", width=44, command=self._apply_ith).pack(side="left", padx=(6, 0))
         self.lbl_ith_calc = ctk.CTkLabel(sec, text="DAC: — ( — V)", font=ctk.CTkFont(size=11))
-        self.lbl_ith_calc.pack(anchor="w", pady=(4, 0))
+        self.lbl_ith_calc.pack(anchor="w", pady=(2, 0))
         # Preset (§8.2) — opzionali in questa fase
-        pr = ctk.CTkFrame(sec, fg_color="transparent"); pr.pack(fill="x", pady=(6, 0))
+        pr = ctk.CTkFrame(sec, fg_color="transparent"); pr.pack(fill="x", pady=(3, 0))
         ctk.CTkLabel(pr, text="Preset:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 4))
         for n in (1, 2, 3):
             ctk.CTkButton(pr, text=f"Carica {n}", width=64, command=lambda n=n: self._th_load(n)).pack(side="left", padx=2)
-            ctk.CTkButton(pr, text=f"Usa {n}", width=48, fg_color="gray40", hover_color="gray25", command=lambda n=n: self._send_cmd(f"TH_SELECT {n}")).pack(side="left", padx=(0, 6))
+            ctk.CTkButton(pr, text=f"Usa {n}", width=48, fg_color=CLR_NEUTRAL, hover_color=CLR_NEUTRAL_HOVER, command=lambda n=n: self._send_cmd(f"TH_SELECT {n}")).pack(side="left", padx=(0, 6))
 
         # --- Tempistiche ---
-        sec = self._section(p, r, "Tempistiche"); r += 1
+        sec = self._section(p, r, "Tempistiche", kind="config"); r += 1
         tr = ctk.CTkFrame(sec, fg_color="transparent"); tr.pack(fill="x")
         ctk.CTkLabel(tr, text="T_HOLD (ms):").pack(side="left", padx=(0, 4))
         ctk.CTkEntry(tr, textvariable=self.thold_val, width=60).pack(side="left")
@@ -302,7 +391,7 @@ class AntiSELDashboard(ctk.CTk):
         ctk.CTkButton(tr, text="Set", width=44, command=self._set_ton).pack(side="left", padx=(4, 0))
 
         # --- Hardware ---
-        sec = self._section(p, r, "Hardware"); r += 1
+        sec = self._section(p, r, "Hardware", kind="config"); r += 1
         hr = ctk.CTkFrame(sec, fg_color="transparent"); hr.pack(fill="x")
         ctk.CTkLabel(hr, text="R_SHUNT (Ω):").pack(side="left", padx=(0, 4))
         ctk.CTkEntry(hr, textvariable=self.r_shunt, width=70).pack(side="left", padx=(0, 16))
@@ -310,32 +399,49 @@ class AntiSELDashboard(ctk.CTk):
         ctk.CTkEntry(hr, textvariable=self.ina_gain, width=70).pack(side="left")
 
         # --- Run ---
-        sec = self._section(p, r, "Run (nomi file CSV)"); r += 1
+        sec = self._section(p, r, "Run (nomi file CSV)", kind="config"); r += 1
         rr = ctk.CTkFrame(sec, fg_color="transparent"); rr.pack(fill="x")
         for lbl, var, w in (("DUT id", self.dut_id, 110), ("LET", self.let_id, 70), ("Run id", self.run_id, 90)):
             ctk.CTkLabel(rr, text=f"{lbl}:").pack(side="left", padx=(0, 3))
             ctk.CTkEntry(rr, textvariable=var, width=w).pack(side="left", padx=(0, 8))
 
         # --- Stato MCU ---
-        sec = self._section(p, r, "Stato"); r += 1
+        sec = self._section(p, r, "Stato", kind="info"); r += 1
         st = ctk.CTkFrame(sec, fg_color="transparent"); st.pack(fill="x")
-        st.grid_columnconfigure((0, 1, 2, 3), weight=1)
-        self.metric_state   = self._add_metric(st, 0, "Stato MCU", "—")
-        self.metric_retries = self._add_metric(st, 1, "Tentativi", f"0/{SEL_RETRY_MAX}")
-        self.metric_sel     = self._add_metric(st, 2, "SEL", "0")
-        self.metric_hce     = self._add_metric(st, 3, "HCE", "0")
+        st.grid_columnconfigure((0, 1, 2, 3, 4, 5, 6, 7), weight=1)
+        self.metric_state   = self._add_metric(st, 0, "Stato MCU", "—", col=0)
+        self.metric_retries = self._add_metric(st, 0, "Tentativi", f"0/{SEL_RETRY_MAX}", col=1)
+        self.metric_sel     = self._add_metric(st, 0, "SEL", "0", col=2)
+        self.metric_hce     = self._add_metric(st, 0, "HCE", "0", col=3)
         st2 = ctk.CTkFrame(sec, fg_color="transparent"); st2.pack(fill="x")
-        self.metric_dac  = self._add_metric(st2, 0, "DAC read", "— counts")
-        self.metric_dacv = self._add_metric(st2, 1, "Volt read", "— V")
+        st2.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        self.metric_dac  = self._add_metric(st2, 0, "DAC read", "— counts", col=0)
+        self.metric_dacv = self._add_metric(st2, 0, "Volt read", "— V", col=1)
 
         self._apply_ith()  # inizializza lbl_ith_calc + cur_dac
 
-    def _section(self, parent, row, title):
-        f = ctk.CTkFrame(parent)
-        f.grid(row=row, column=0, sticky="ew", padx=4, pady=4)
-        ctk.CTkLabel(f, text=title, font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=8, pady=(6, 2))
-        body = ctk.CTkFrame(f, fg_color="transparent")
-        body.pack(fill="x", padx=8, pady=(0, 8))
+    _SECTION_STYLE = {
+        "protect": (CLR_ACCENT_PROTECT, CLR_CARD_PROTECT),
+        "config":  (CLR_ACCENT_CONFIG,  CLR_CARD_CONFIG),
+        "info":    (CLR_ACCENT_INFO,    CLR_CARD_INFO),
+    }
+
+    def _section(self, parent, row, title, kind="config"):
+        """Card di sezione con barra accento colorata (gerarchia visiva):
+        rosso = azioni/protezione DUT, blu = configurazione, grigio = stato."""
+        accent, bg = self._SECTION_STYLE.get(kind, self._SECTION_STYLE["config"])
+        outer = ctk.CTkFrame(parent, fg_color=bg, corner_radius=8)
+        outer.grid(row=row, column=0, sticky="ew", padx=5, pady=6)
+        outer.grid_columnconfigure(1, weight=1)
+        # height=1: senza override esplicito CTkFrame usa un'altezza di
+        # default di 200px che, essendo gridata (non "place"), farebbe
+        # crescere l'intera card a 200px indipendentemente dal contenuto.
+        bar = ctk.CTkFrame(outer, fg_color=accent, width=4, height=1, corner_radius=0)
+        bar.grid(row=0, column=0, rowspan=2, sticky="ns")
+        ctk.CTkLabel(outer, text=title.upper(), font=ctk.CTkFont(size=11, weight="bold"),
+                     text_color=accent).grid(row=0, column=1, sticky="w", padx=12, pady=(8, 3))
+        body = ctk.CTkFrame(outer, fg_color="transparent")
+        body.grid(row=1, column=1, sticky="ew", padx=12, pady=(0, 9))
         return body
 
     # ---------------------------------------------------------------- I_TH preciso
@@ -421,9 +527,9 @@ class AntiSELDashboard(ctk.CTk):
         ctk.CTkLabel(toolbar, text="Grafici", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=(2, 12))
         self.btn_pause = ctk.CTkButton(toolbar, text="⏸ Pausa", width=90, command=self._toggle_pause)
         self.btn_pause.pack(side="left", padx=4)
-        ctk.CTkButton(toolbar, text="Azzera", width=80, fg_color="gray40", hover_color="gray25", command=self._clear_plots).pack(side="left", padx=4)
+        ctk.CTkButton(toolbar, text="Azzera", width=80, fg_color=CLR_NEUTRAL, hover_color=CLR_NEUTRAL_HOVER, command=self._clear_plots).pack(side="left", padx=4)
 
-        self.fig = Figure(figsize=(5, 6), dpi=100)
+        self.fig = Figure(figsize=(3.8, 6), dpi=100)
         self.fig.subplots_adjust(hspace=0.5, left=0.13, right=0.86, top=0.94, bottom=0.09)
 
         self.ax_slow = self.fig.add_subplot(211)
@@ -433,7 +539,7 @@ class AntiSELDashboard(ctk.CTk):
         self.ax_slow.grid(True, alpha=0.3)
         self.ax_slow.tick_params(labelsize=8)
         (self.line_slow,) = self.ax_slow.plot([], [], color="#2563eb", lw=1.2, label="I")
-        (self.line_thr,) = self.ax_slow.plot([], [], color="#cc0000", lw=1.0, ls="--", alpha=0.8, label="soglia (V_LIMIT)")
+        (self.line_thr,) = self.ax_slow.plot([], [], color=CLR_DANGER, lw=1.0, ls="--", alpha=0.8, label="soglia (V_LIMIT)")
         (self.line_slow_trace,) = self.ax_slow.plot([], [], color="#800080", lw=1.3, label="evento (100 kSa/s)")
         self.ax_slow.legend(loc="upper right", fontsize=7)
         self.ax_slow_v = self.ax_slow.twinx()
@@ -465,12 +571,20 @@ class AntiSELDashboard(ctk.CTk):
         self.trace_overlay_segments.clear()
         self._trace_overlay_acc = []
         self.trace_overlay_t0 = None
+        self.rtu_t.clear(); self.rtu_temp.clear(); self.rtu_sp.clear()
+        self.rtu_t0 = None
         try:
             self.line_slow.set_data([], [])
             self.line_thr.set_data([], [])
             self.line_trace.set_data([], [])
             self.line_slow_trace.set_data([], [])
             self.canvas.draw_idle()
+        except Exception:
+            pass
+        try:
+            self.line_temp.set_data([], [])
+            self.line_setpoint.set_data([], [])
+            self.canvas_rtu_temp.draw_idle()
         except Exception:
             pass
 
@@ -520,22 +634,33 @@ class AntiSELDashboard(ctk.CTk):
                 self.canvas.draw_idle()
             except Exception:
                 pass
+            try:
+                if self.rtu_t:
+                    self.line_temp.set_data(list(self.rtu_t), list(self.rtu_temp))
+                    self.line_setpoint.set_data(list(self.rtu_t), list(self.rtu_sp))
+                    self.ax_temp.relim(); self.ax_temp.autoscale_view()
+                    self.canvas_rtu_temp.draw_idle()
+            except Exception:
+                pass
         self.after(400, self._refresh_plots)
 
     # ---------------------------------------------------------------- Log area
     def _build_log_area(self, parent):
         parent.grid_columnconfigure((0, 1), weight=1)
         parent.grid_rowconfigure(1, weight=1)
-        ctk.CTkLabel(parent, text="Log Comunicazione TCP", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, pady=4)
-        ctk.CTkLabel(parent, text="Log 10Hz & Event Traces", font=ctk.CTkFont(weight="bold")).grid(row=0, column=1, pady=4)
-        self.log = ctk.CTkTextbox(parent, font=ctk.CTkFont(family="Courier", size=12), state="disabled")
+        ctk.CTkLabel(parent, text="LOG COMUNICAZIONE TCP", font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=CLR_ACCENT_CONFIG).grid(row=0, column=0, pady=(8, 4))
+        ctk.CTkLabel(parent, text="LOG 10 HZ & EVENT TRACES", font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=CLR_ACCENT_CONFIG).grid(row=0, column=1, pady=(8, 4))
+        self.log = ctk.CTkTextbox(parent, font=ctk.CTkFont(family="Courier", size=12), state="disabled", corner_radius=8)
         self.log.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="nsew")
-        self.slow_log = ctk.CTkTextbox(parent, font=ctk.CTkFont(family="Courier", size=12), state="disabled", fg_color="#F0F0F0")
+        self.slow_log = ctk.CTkTextbox(parent, font=ctk.CTkFont(family="Courier", size=12), state="disabled",
+                                        fg_color="#F0F0F0", corner_radius=8)
         self.slow_log.grid(row=1, column=1, padx=8, pady=(0, 8), sticky="nsew")
-        self.log.tag_config("tx", foreground="#0052cc")
-        self.log.tag_config("rx", foreground="#008000")
-        self.log.tag_config("info", foreground="#b35900")
-        self.log.tag_config("err", foreground="#cc0000")
+        self.log.tag_config("tx", foreground=CLR_ACCENT_CONFIG)
+        self.log.tag_config("rx", foreground=CLR_OK)
+        self.log.tag_config("info", foreground=CLR_WARN)
+        self.log.tag_config("err", foreground=CLR_DANGER)
         self.slow_log.tag_config("trace", foreground="#800080")
 
     # ============================================================ CONNESSIONE
@@ -573,8 +698,8 @@ class AntiSELDashboard(ctk.CTk):
         self._on_disconnected()
 
     def _on_connected(self):
-        self.lbl_status.configure(text="● CONNESSO", text_color="green")
-        self.btn_conn.configure(text="Disconnetti", fg_color="red", hover_color="darkred")
+        self.lbl_status.configure(text="● CONNESSO", fg_color=CLR_OK)
+        self.btn_conn.configure(text="Disconnetti", fg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER)
         self._log("Connesso.", "info")
         try:
             ts = time.strftime("%Y%m%d_%H%M%S")
@@ -603,7 +728,7 @@ class AntiSELDashboard(ctk.CTk):
             try: self.events_csv.close()
             except Exception: pass
             self.events_csv = None
-        self.lbl_status.configure(text="● DISCONNESSO", text_color="red")
+        self.lbl_status.configure(text="● DISCONNESSO", fg_color=CLR_DANGER)
         self.btn_conn.configure(text="Connetti", fg_color=["#3B8ED0", "#1F6AA5"], hover_color=["#36719F", "#144870"])
         self.btn_ping_loop.configure(fg_color="transparent")
         self._log("Disconnesso.", "info")
@@ -651,12 +776,14 @@ class AntiSELDashboard(ctk.CTk):
         self._rtu_on_disconnected()
 
     def _rtu_on_connected(self):
-        self.lbl_rtu_status.configure(text="● connesso", text_color="green")
-        self.btn_rtu_conn.configure(text="Disconnetti RTU/PID", fg_color="red", hover_color="darkred")
+        self.lbl_rtu_status.configure(text="● connesso", fg_color=CLR_OK)
+        self.btn_rtu_conn.configure(text="Disconnetti RTU/PID", fg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER)
+        self.rtu_t.clear(); self.rtu_temp.clear(); self.rtu_sp.clear()
+        self.rtu_t0 = None
         self._log("RTU/PID: connesso.", "info")
 
     def _rtu_on_disconnected(self):
-        self.lbl_rtu_status.configure(text="● non connesso", text_color="red")
+        self.lbl_rtu_status.configure(text="● non connesso", fg_color=CLR_DANGER)
         self.btn_rtu_conn.configure(text="Connetti RTU/PID", fg_color=["#3B8ED0", "#1F6AA5"], hover_color=["#36719F", "#144870"])
         self.metric_temp.configure(text="—")
         self.metric_pwm.configure(text="—")
@@ -715,7 +842,19 @@ class AntiSELDashboard(ctk.CTk):
                     fields = self._parse_kv(msg)
                     if "TEMP" in fields:
                         try:
-                            self.metric_temp.configure(text=f"{float(fields['TEMP']):.1f}")
+                            temp = float(fields["TEMP"])
+                            self.metric_temp.configure(text=f"{temp:.1f}")
+                            now = time.time()
+                            if self.rtu_t0 is None:
+                                self.rtu_t0 = now
+                            try:
+                                sp = float(self.setpoint_val.get())
+                            except ValueError:
+                                sp = float("nan")
+                            self.rtu_t.append(now - self.rtu_t0)
+                            self.rtu_temp.append(temp)
+                            self.rtu_sp.append(sp)
+                            self._plot_dirty = True
                         except ValueError:
                             pass
                     if "PWM" in fields:
@@ -990,12 +1129,12 @@ class AntiSELDashboard(ctk.CTk):
         else:
             name = state or "—"
         if name in ("FAULT", "MANUAL_OFF"):
-            color = "#cc0000"
+            color = CLR_DANGER
         elif name in ("ALARM", "HOLD_RUN", "HCE_SAVE", "CUTOFF", "TON_RUN",
                       "RECOVERY", "VERIFY"):
-            color = "#b35900"
+            color = CLR_WARN
         else:
-            color = "black"
+            color = "gray10"
         self.metric_state.configure(text=name, text_color=color)
         if retry is not None:
             try:
@@ -1003,7 +1142,7 @@ class AntiSELDashboard(ctk.CTk):
             except (ValueError, AttributeError):
                 nmax = SEL_RETRY_MAX
             self.metric_retries.configure(text=f"{retry}/{nmax}",
-                                          text_color="#cc0000" if retry >= nmax else "black")
+                                          text_color=CLR_DANGER if retry >= nmax else "gray10")
         self._set_permanent_off(name == "FAULT")
 
     def _set_permanent_off(self, perm):

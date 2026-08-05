@@ -188,6 +188,32 @@ La GUI interroga `GET TEMP`/`GET PID` una volta al secondo dopo la
 connessione. Il parsing lato dashboard è in `_rtu_send_cmd` / `_poll_rtu_queue`
 in `antisel_dashboard_eth.py`.
 
+### Logica di controllo raccomandata per il PID CTRL
+
+Il DUT viene riscaldato (mai raffreddato) tramite PWM sull'Heat System della
+Irradiation Board: l'attuatore è quindi unidirezionale, e il PID va progettato
+di conseguenza:
+
+- **Uscita**: duty cycle PWM, clampato **0–100%**.
+- **Anti-windup**: clamp condizionale sull'integrale — l'integrale si
+  aggiorna solo se l'uscita non è già saturata nella direzione spinta
+  dall'errore corrente, altrimenti l'integratore si "carica" durante la
+  salita a +85 °C e causa overshoot oltre la tolleranza richiesta (±2 °C,
+  Tabella 3).
+- **Frequenza di aggiornamento**: ~1 Hz, coerente con la costante di tempo
+  termica del banco (secondi–minuti) e con il polling `GET TEMP` della GUI;
+  un update più veloce non porta benefici e amplifica solo il rumore di
+  misura dell'RTU.
+- **Termine derivativo**: piccolo o nullo (PI puro spesso sufficiente); la
+  misura di temperatura è intrinsecamente rumorosa/quantizzata e il sistema
+  termico è già ben smorzato.
+- **Guadagni fissi**: sufficienti se la massa termica del DUT non varia
+  significativamente tra i run; da tarare sul banco reale.
+
+Implementazione di riferimento (Python, non eseguita dalla dashboard — utile
+come base per il firmware del PID CTRL reale): [`pid_controller.py`](../pid_controller.py),
+classe `HeaterPID`.
+
 ---
 
 ## 7. Sequenza tipica alla connessione (lato GUI)

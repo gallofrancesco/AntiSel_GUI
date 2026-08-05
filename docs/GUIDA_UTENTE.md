@@ -49,7 +49,7 @@ La finestra è divisa in quattro colonne più un'area di log in basso:
 | **Sinistra** | Stato connessione Nucleo, pulsante Connetti/Disconnetti, metriche RTT/TX/RX, test di rete (PING, STATUS, Ping Loop), campo comando libero |
 | **Centro** | Azioni DUT, gestione riarmo latch INA301, soglia `I_TH`, tempistiche `T_HOLD`/`T_ON`, parametri hardware (`R_SHUNT`, `GAIN`), identificativi run (per i nomi dei CSV), pannello di stato |
 | **Grafici** | Grafico continuo (log 10 Hz) e grafico dell'ultima traccia evento ad alta risoluzione |
-| **Destra** | Pannello **PID CTRL / RTU** — placeholder per il controllo temperatura (Figura 1 della descrizione di sistema): connessione TCP separata, temperatura DUT, PWM/stato PID, setpoint (vedi §4.10) |
+| **Destra** | Pannello **PID CTRL / RTU** — placeholder per il controllo temperatura (Figura 1 della descrizione di sistema): grafico temperatura in cima (§4.11), connessione TCP separata, PWM/stato PID, setpoint (vedi §4.10) |
 | **In basso** | Log cronologico colorato di tutte le operazioni |
 
 ### 4.1 Connessione
@@ -152,6 +152,20 @@ agganciato quando l'hardware sarà definito.
 Quando le specifiche reali di PID CTRL e RTU saranno disponibili (protocollo
 testuale, Modbus TCP o altro), è sufficiente aggiornare il parsing in
 `_rtu_send_cmd`/`_poll_rtu_queue` senza modificare il resto della dashboard.
+
+La logica di controllo raccomandata per il PID CTRL reale (anti-windup,
+frequenza di aggiornamento, guadagni) è descritta in
+[AntiSEL_Protocollo_Comandi.md](AntiSEL_Protocollo_Comandi.md#logica-di-controllo-raccomandata-per-il-pid-ctrl),
+con implementazione di riferimento in [`pid_controller.py`](../pid_controller.py).
+
+### 4.11 Grafico temperatura
+
+In cima alla quarta colonna (PID CTRL/RTU), allineato con il grafico
+"Corrente DUT" della colonna grafici, compare un grafico dedicato con
+`T_DUT` (dall'RTU) nel tempo e una linea tratteggiata di riferimento al
+setpoint corrente. Si aggiorna automaticamente a ogni lettura `GET TEMP` e si
+azzera insieme agli altri grafici con il pulsante **Azzera** (colonna
+grafici), o alla riconnessione del link RTU/PID.
 
 ## 5. File generati (CSV)
 
