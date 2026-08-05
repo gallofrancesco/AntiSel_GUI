@@ -52,6 +52,19 @@ La finestra è divisa in quattro colonne più un'area di log in basso:
 | **Destra** | Pannello **PID CTRL / RTU** — placeholder per il controllo temperatura (Figura 1 della descrizione di sistema): grafico temperatura in cima (§4.11), connessione TCP separata, PWM/stato PID, setpoint (vedi §4.10) |
 | **In basso** | Log cronologico colorato di tutte le operazioni |
 
+Le sezioni della colonna centrale sono raggruppate per gerarchia visiva
+tramite una barra colorata a sinistra della card:
+
+- 🔴 **rosso** — azioni/protezione DUT (Azioni DUT, Latch INA301): i
+  controlli più critici per la sicurezza del componente durante il test.
+- 🔵 **blu** — configurazione (Soglia I_TH, Tempistiche, Hardware, Run):
+  parametri che si impostano prima/durante il test ma non agiscono
+  direttamente sull'alimentazione del DUT.
+- ⚪ **grigio** — stato/informazioni (pannello Stato): sola lettura.
+
+Lo stesso schema colori vale per gli indicatori di connessione (chip rosso
+"non connesso" / verde "connesso") a sinistra e a destra della finestra.
+
 ### 4.1 Connessione
 
 1. Verificare/impostare `HOST`/`PORT` (vedi §2).
