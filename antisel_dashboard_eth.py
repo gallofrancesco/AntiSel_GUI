@@ -146,6 +146,7 @@ class AntiSELDashboard(ctk.CTk):
         # Buffer grafici
         self.slow_t   = deque(maxlen=600)
         self.slow_i   = deque(maxlen=600)
+        self.slow_v   = deque(maxlen=600)
         self.slow_thr = deque(maxlen=600)
         self.slow_t0  = None
         self._trace_acc = []
@@ -555,10 +556,13 @@ class AntiSELDashboard(ctk.CTk):
         (self.line_slow,) = self.ax_slow.plot([], [], color="#2563eb", lw=1.2, label="I")
         (self.line_thr,) = self.ax_slow.plot([], [], color=CLR_DANGER, lw=1.0, ls="--", alpha=0.8, label="soglia (V_LIMIT)")
         (self.line_slow_trace,) = self.ax_slow.plot([], [], color="#800080", lw=1.3, label="evento (100 kSa/s)")
-        self.ax_slow.legend(loc="upper right", fontsize=7)
         self.ax_slow_v = self.ax_slow.twinx()
         self.ax_slow_v.set_ylabel("V [V]", fontsize=8)
         self.ax_slow_v.tick_params(labelsize=8)
+        (self.line_slow_v,) = self.ax_slow_v.plot([], [], color="#16a34a", lw=1.2, ls=":", label="V")
+        h1, l1 = self.ax_slow.get_legend_handles_labels()
+        h2, l2 = self.ax_slow_v.get_legend_handles_labels()
+        self.ax_slow.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=7)
 
         self.ax_trace = self.fig.add_subplot(212)
         self.ax_trace.set_title("Ultima traccia evento", fontsize=10)
@@ -578,7 +582,7 @@ class AntiSELDashboard(ctk.CTk):
                                  fg_color="green" if self.plot_paused else "#1f6aa5")
 
     def _clear_plots(self):
-        self.slow_t.clear(); self.slow_i.clear(); self.slow_thr.clear()
+        self.slow_t.clear(); self.slow_i.clear(); self.slow_v.clear(); self.slow_thr.clear()
         self.slow_t0 = None
         self.trace_x = []; self.trace_y = []
         self._trace_acc = []
@@ -589,6 +593,7 @@ class AntiSELDashboard(ctk.CTk):
         self.rtu_t0 = None
         try:
             self.line_slow.set_data([], [])
+            self.line_slow_v.set_data([], [])
             self.line_thr.set_data([], [])
             self.line_trace.set_data([], [])
             self.line_slow_trace.set_data([], [])
@@ -637,10 +642,9 @@ class AntiSELDashboard(ctk.CTk):
                         ox.extend(p[0] for p in seg)
                         oy.extend(p[1] for p in seg)
                     self.line_slow_trace.set_data(ox, oy)
+                    self.line_slow_v.set_data(list(self.slow_t), list(self.slow_v))
                     self.ax_slow.relim(); self.ax_slow.autoscale_view()
-                    lo, hi = self.ax_slow.get_ylim()
-                    k = self._rg_factor()
-                    self.ax_slow_v.set_ylim(lo * k, hi * k)
+                    self.ax_slow_v.relim(); self.ax_slow_v.autoscale_view()
                 if self.trace_x:
                     self.line_trace.set_data(self.trace_x, self.trace_y)
                     self.ax_trace.set_title(f"Ultima traccia evento — {self.trace_lbl}", fontsize=10)
@@ -724,7 +728,7 @@ class AntiSELDashboard(ctk.CTk):
             self.events_csv.write("PC_Time,Event,Detail\n")
             self._log(f"File di run: {prefix}_*.csv", "info")
             self._log_event("CONNECT", f"{HOST}:{PORT}")
-            self.slow_t.clear(); self.slow_i.clear(); self.slow_thr.clear(); self.slow_t0 = None
+            self.slow_t.clear(); self.slow_i.clear(); self.slow_v.clear(); self.slow_thr.clear(); self.slow_t0 = None
             # Protocollo v5: invia la config elettrica/parametrica al firmware
             self._send_config()
         except Exception as e:
@@ -987,6 +991,7 @@ class AntiSELDashboard(ctk.CTk):
                                     self.slow_t0 = now
                                 try:
                                     self.slow_i.append(i_mA)
+                                    self.slow_v.append(i_mA * self._rg_factor())
                                     self.slow_t.append(now - self.slow_t0)
                                     self.slow_thr.append(thr)
                                     self._plot_dirty = True
