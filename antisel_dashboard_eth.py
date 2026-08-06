@@ -288,8 +288,8 @@ class AntiSELDashboard(ctk.CTk):
         self.ax_temp.set_ylabel("T [°C]", fontsize=7)
         self.ax_temp.grid(True, alpha=0.3)
         self.ax_temp.tick_params(labelsize=7)
-        (self.line_temp,) = self.ax_temp.plot([], [], color="#c2410c", lw=1.2, label="T_DUT")
-        (self.line_setpoint,) = self.ax_temp.plot([], [], color="#666666", lw=1.0, ls="--", alpha=0.8, label="SP")
+        (self.line_temp,) = self.ax_temp.plot([], [], color="#c2410c", lw=1.2, label="T_DUT (misurata)")
+        (self.line_setpoint,) = self.ax_temp.plot([], [], color="#666666", lw=1.0, ls="--", alpha=0.8, label="Setpoint")
         self.ax_temp.legend(loc="upper right", fontsize=6)
 
         self.canvas_rtu_temp = FigureCanvasTkAgg(self.fig_rtu_temp, master=body)
