@@ -396,7 +396,8 @@ class AntiSELDashboard(ctk.CTk):
         ctk.CTkLabel(hr, text="R_SHUNT (Ω):").pack(side="left", padx=(0, 4))
         ctk.CTkEntry(hr, textvariable=self.r_shunt, width=70).pack(side="left", padx=(0, 16))
         ctk.CTkLabel(hr, text="Gain INA301:").pack(side="left", padx=(0, 4))
-        ctk.CTkEntry(hr, textvariable=self.ina_gain, width=70).pack(side="left")
+        ctk.CTkEntry(hr, textvariable=self.ina_gain, width=70).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(hr, text="Set", width=44, command=self._set_hw).pack(side="left", padx=(4, 0))
 
         # --- Run ---
         sec = self._section(p, r, "Run (nomi file CSV)", kind="config"); r += 1
@@ -499,6 +500,19 @@ class AntiSELDashboard(ctk.CTk):
         except ValueError:
             return
         self._send_cmd(f"SET TON_US {us}")
+
+    def _set_hw(self):
+        """Invia R_SHUNT/Gain al firmware e ricalcola la soglia I_TH corrente
+        (protocollo v5): senza questo Set i valori restano solo locali fino
+        alla prossima connessione (_send_config)."""
+        try:
+            r = float(self.r_shunt.get()); g = float(self.ina_gain.get())
+        except ValueError:
+            self._log("R_SHUNT/Gain non validi.", "err")
+            return
+        self._send_cmd(f"SET GAIN {int(g)}")
+        self._send_cmd(f"SET RSHUNT {r:.3f}")
+        self._apply_ith()
 
     def _send_config(self):
         """Invia l'intera config elettrica/parametrica al firmware alla
