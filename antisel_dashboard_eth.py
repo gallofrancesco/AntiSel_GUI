@@ -104,9 +104,15 @@ class AntiSELDashboard(ctk.CTk):
         # window manager, invece di calcolarla sullo schermo virtuale.
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
-        win_w = max(1560, min(int(screen_w * 0.9), 1850))
-        win_h = max(780, min(int(screen_h * 0.85), 980))
+        win_w = max(1560, min(int(screen_w * 0.95), 1850))
+        win_h = max(780, min(int(screen_h * 0.95), 1200))
         self.geometry(f"{win_w}x{win_h}")
+        def _maximize():
+            try:
+                self.state("zoomed")
+            except Exception:
+                pass
+        self.after(100, _maximize)
 
         # Client di comunicazione (nucleo_client.py)
         self.client     = NucleoClient(HOST, PORT)
@@ -232,7 +238,7 @@ class AntiSELDashboard(ctk.CTk):
         legend.get_frame().set_facecolor(BG_PANEL_RAISED)
         legend.get_frame().set_edgecolor(AXIS_LINE)
         for text in legend.get_texts():
-            text.set_color(INK_SECONDARY)
+            text.set_color(INK_PRIMARY)
         return legend
 
     # ---------------------------------------------------------------- Colonna SX
@@ -309,10 +315,10 @@ class AntiSELDashboard(ctk.CTk):
         self.ax_temp.set_title("T_DUT (RTU/PID)", fontsize=9)
         self.ax_temp.set_xlabel("t [s]", fontsize=7)
         self.ax_temp.set_ylabel("T [°C]", fontsize=7)
-        self.ax_temp.tick_params(labelsize=7)
+        self.ax_temp.tick_params(labelsize=9)
         (self.line_temp,) = self.ax_temp.plot([], [], color=CLR_SERIES_ORANGE, lw=1.2, label="T_DUT (misurata)")
         (self.line_setpoint,) = self.ax_temp.plot([], [], color=INK_MUTED, lw=1.0, ls="--", alpha=0.8, label="Setpoint")
-        self._style_legend(self.ax_temp.legend(loc="upper right", fontsize=6))
+        self._style_legend(self.ax_temp.legend(loc="upper right", fontsize=9))
 
         self.canvas_rtu_temp = FigureCanvasTkAgg(self.fig_rtu_temp, master=body)
         self.canvas_rtu_temp.get_tk_widget().configure(bg=BG_PANEL, highlightthickness=0)
@@ -566,8 +572,8 @@ class AntiSELDashboard(ctk.CTk):
         self.btn_pause.pack(side="left", padx=4)
         ctk.CTkButton(toolbar, text="Azzera", width=80, fg_color=CLR_NEUTRAL, hover_color=CLR_NEUTRAL_HOVER, command=self._clear_plots).pack(side="left", padx=4)
 
-        self.fig = Figure(figsize=(3.8, 9), dpi=100)
-        self.fig.subplots_adjust(hspace=0.6, left=0.16, right=0.95, top=0.96, bottom=0.06)
+        self.fig = Figure(figsize=(3.8, 5.0), dpi=100)
+        self.fig.subplots_adjust(hspace=0.35, left=0.16, right=0.95, top=0.96, bottom=0.06)
         self._style_figure(self.fig)
 
         self.ax_slow = self.fig.add_subplot(311)
@@ -575,18 +581,18 @@ class AntiSELDashboard(ctk.CTk):
         self.ax_slow.set_title("Corrente DUT (log 10 Hz)", fontsize=10)
         self.ax_slow.set_xlabel("t [s]", fontsize=8)
         self.ax_slow.set_ylabel("I [mA]", fontsize=8)
-        self.ax_slow.tick_params(labelsize=8)
+        self.ax_slow.tick_params(labelsize=10)
         (self.line_slow,) = self.ax_slow.plot([], [], color=CLR_SERIES_BLUE, lw=1.2, label="I")
         (self.line_thr,) = self.ax_slow.plot([], [], color=CLR_DANGER, lw=1.0, ls="--", alpha=0.8, label="soglia (V_LIMIT)")
         (self.line_slow_trace,) = self.ax_slow.plot([], [], color=CLR_SERIES_VIOLET, lw=1.3, label="evento (100 kSa/s)")
-        self._style_legend(self.ax_slow.legend(loc="upper right", fontsize=7))
+        self._style_legend(self.ax_slow.legend(loc="upper right", fontsize=9))
 
         self.ax_volt = self.fig.add_subplot(312)
         self._style_axes(self.ax_volt)
         self.ax_volt.set_title("Tensione DUT (misurata)", fontsize=10)
         self.ax_volt.set_xlabel("t [s]", fontsize=8)
         self.ax_volt.set_ylabel("V [V]", fontsize=8)
-        self.ax_volt.tick_params(labelsize=8)
+        self.ax_volt.tick_params(labelsize=10)
         (self.line_slow_v,) = self.ax_volt.plot([], [], color=CLR_SERIES_AQUA, lw=1.2, label="V")
 
         self.ax_trace = self.fig.add_subplot(313)
@@ -594,7 +600,7 @@ class AntiSELDashboard(ctk.CTk):
         self.ax_trace.set_title("Ultima traccia evento", fontsize=10)
         self.ax_trace.set_xlabel("t [us]", fontsize=8)
         self.ax_trace.set_ylabel("I [mA]", fontsize=8)
-        self.ax_trace.tick_params(labelsize=8)
+        self.ax_trace.tick_params(labelsize=10)
         (self.line_trace,) = self.ax_trace.plot([], [], color=CLR_SERIES_VIOLET, lw=1.0)
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=p)
