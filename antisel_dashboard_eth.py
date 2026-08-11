@@ -35,36 +35,63 @@ from nucleo_client import (
 )
 
 # ---------------------------------------------------------------- Design tokens
-# Palette semantica dei pulsanti/stati, usata ovunque al posto di colori
-# letterali sparsi, per coerenza visiva fra le sezioni.
-CLR_OK             = "#15803d"
-CLR_OK_HOVER       = "#0f5c2c"
-CLR_DANGER         = "#dc2626"
-CLR_DANGER_HOVER   = "#a91d1d"
-CLR_WARN           = "#b45309"
-CLR_WARN_HOVER     = "#8a3d06"
+# Tema scuro in stile analizzatore da banco (superfici quasi nere, pannelli
+# leggermente rilevati, accenti categoriali). Hex dei ruoli e della palette
+# categoriale/di stato dalla skill dataviz (references/palette.md, colonna
+# "Dark"): validati per contrasto e distinguibilità daltonica su sfondo
+# scuro — non scelti a occhio.
+BG_PAGE            = "#0d0d0d"   # sfondo finestra
+BG_PANEL           = "#1a1a19"   # canvas grafici, superficie card di base
+BG_PANEL_RAISED    = "#202020"   # pannelli metriche (leggermente rilevati)
+BG_SIDEBAR         = "#111110"   # colonna sinistra
+
+INK_PRIMARY        = "#ffffff"
+INK_SECONDARY      = "#c3c2b7"
+INK_MUTED          = "#898781"
+GRID_LINE          = "#2c2c2a"
+AXIS_LINE          = "#383835"
+
+# Palette semantica dei pulsanti/stati (status palette dataviz: good/warning/
+# critical), usata ovunque al posto di colori letterali sparsi.
+CLR_OK             = "#0ca30c"   # status "good"
+CLR_OK_HOVER       = "#087f0a"
+CLR_DANGER         = "#d03b3b"   # status "critical"
+CLR_DANGER_HOVER   = "#a52f2f"
+CLR_WARN           = "#c98500"   # status "warning" (step scuro, leggibile su bottone)
+CLR_WARN_HOVER     = "#9c6900"
+CLR_WARN_DEEP      = "#8a5c00"   # ACK FAULT: tono piu' cupo di CLR_WARN
+CLR_WARN_DEEP_HOVER = "#5c3d00"
 CLR_NEUTRAL        = "#52525b"
 CLR_NEUTRAL_HOVER  = "#3f3f46"
-CLR_MUTED          = "gray45"
+CLR_MUTED          = INK_MUTED
 
 # Accenti/tinte delle card per sezione: rosso = protezione/sicurezza DUT
 # (azioni critiche), blu = configurazione, grigio = informazioni/stato.
-CLR_ACCENT_PROTECT = "#dc2626"
-CLR_ACCENT_CONFIG  = "#1f6aa5"
-CLR_ACCENT_INFO    = "#52525b"
-CLR_CARD_PROTECT   = ("#fdf1f1", "#3a1f1f")
-CLR_CARD_CONFIG    = ("#f2f7fc", "#1c2733")
-CLR_CARD_INFO      = ("#f2f2f3", "#232326")
+CLR_ACCENT_PROTECT = CLR_DANGER
+CLR_ACCENT_CONFIG  = "#3987e5"   # categorico "blue" (step scuro)
+CLR_ACCENT_CONFIG_HOVER = "#2a78d6"
+CLR_ACCENT_INFO    = CLR_NEUTRAL
+CLR_CARD_PROTECT   = "#2a1c1c"
+CLR_CARD_CONFIG    = "#16212c"
+CLR_CARD_INFO      = "#1e1e1d"
+
+# Palette categoriale (step scuri) per le serie dei grafici.
+CLR_SERIES_BLUE    = "#3987e5"
+CLR_SERIES_ORANGE  = "#d95926"
+CLR_SERIES_AQUA    = "#199e70"
+CLR_SERIES_VIOLET  = "#9085e9"
+CLR_SERIES_RED     = "#e66767"
 
 
 class AntiSELDashboard(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        ctk.set_appearance_mode("Light")
+        ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
 
         self.title("AntiSEL Dashboard")
+        self.configure(fg_color=BG_PAGE)
         self.minsize(1560, 780)
         # Dimensione iniziale: NON usare winfo_screenwidth/height() per il
         # 100% del calcolo — su setup multi-monitor Tkinter riporta le
@@ -154,10 +181,11 @@ class AntiSELDashboard(ctk.CTk):
         self.grid_rowconfigure(0, weight=3)
         self.grid_rowconfigure(1, weight=1)                   # log
 
-        self.col_left  = ctk.CTkFrame(self, width=230, corner_radius=0, fg_color=("gray90", "gray14"))
+        self.col_left  = ctk.CTkFrame(self, width=230, corner_radius=0, fg_color=BG_SIDEBAR)
         self.col_left.grid(row=0, column=0, sticky="nsew")
         self.col_mid   = ctk.CTkScrollableFrame(self, label_text="Controlli AntiSEL",
-                                                 label_font=ctk.CTkFont(size=14, weight="bold"))
+                                                 label_font=ctk.CTkFont(size=14, weight="bold"),
+                                                 fg_color=BG_PAGE, label_fg_color=BG_PAGE)
         self.col_mid.grid(row=0, column=1, sticky="nsew", padx=(6, 3), pady=6)
         self.col_right = ctk.CTkFrame(self, fg_color="transparent")
         self.col_right.grid(row=0, column=2, sticky="nsew", padx=(3, 3), pady=6)
@@ -182,6 +210,31 @@ class AntiSELDashboard(ctk.CTk):
         val_lbl.grid(row=row, column=col * 2 + 1, padx=10, pady=2, sticky="w")
         return val_lbl
 
+    @staticmethod
+    def _style_figure(fig):
+        """Sfondo scuro per l'area della figura fuori dagli assi (margini)."""
+        fig.patch.set_facecolor(BG_PANEL)
+
+    @staticmethod
+    def _style_axes(ax):
+        """Tema scuro di un subplot: superficie, assi, tick e label."""
+        ax.set_facecolor(BG_PANEL)
+        ax.tick_params(colors=INK_SECONDARY)
+        ax.xaxis.label.set_color(INK_SECONDARY)
+        ax.yaxis.label.set_color(INK_SECONDARY)
+        ax.title.set_color(INK_PRIMARY)
+        for spine in ax.spines.values():
+            spine.set_color(AXIS_LINE)
+        ax.grid(True, alpha=0.7, color=GRID_LINE)
+
+    @staticmethod
+    def _style_legend(legend):
+        legend.get_frame().set_facecolor(BG_PANEL_RAISED)
+        legend.get_frame().set_edgecolor(AXIS_LINE)
+        for text in legend.get_texts():
+            text.set_color(INK_SECONDARY)
+        return legend
+
     # ---------------------------------------------------------------- Colonna SX
     def _build_left(self, p):
         p.grid_columnconfigure(0, weight=1)
@@ -194,10 +247,10 @@ class AntiSELDashboard(ctk.CTk):
         self.lbl_status.grid(row=1, column=0, padx=20, pady=4, sticky="ew")
         self.lbl_target = ctk.CTkLabel(p, text=f"{HOST}:{PORT}", text_color=CLR_MUTED)
         self.lbl_target.grid(row=2, column=0, padx=20, pady=(2, 0))
-        self.btn_conn = ctk.CTkButton(p, text="Connetti", command=self._toggle_connection)
+        self.btn_conn = ctk.CTkButton(p, text="Connetti", fg_color=CLR_ACCENT_CONFIG, hover_color=CLR_ACCENT_CONFIG_HOVER, command=self._toggle_connection)
         self.btn_conn.grid(row=3, column=0, padx=20, pady=12)
 
-        mf = ctk.CTkFrame(p, fg_color=("white", "gray20"), corner_radius=8)
+        mf = ctk.CTkFrame(p, fg_color=BG_PANEL_RAISED, corner_radius=8)
         mf.grid(row=4, column=0, padx=15, pady=8, sticky="ew")
         self.metric_ping = self._add_metric(mf, 0, "RTT ping", "— ms")
         self.metric_tx   = self._add_metric(mf, 1, "TX", "0")
@@ -250,17 +303,19 @@ class AntiSELDashboard(ctk.CTk):
 
         self.fig_rtu_temp = Figure(figsize=(3.6, 3.0), dpi=100)
         self.fig_rtu_temp.subplots_adjust(left=0.18, right=0.95, top=0.90, bottom=0.16)
+        self._style_figure(self.fig_rtu_temp)
         self.ax_temp = self.fig_rtu_temp.add_subplot(111)
+        self._style_axes(self.ax_temp)
         self.ax_temp.set_title("T_DUT (RTU/PID)", fontsize=9)
         self.ax_temp.set_xlabel("t [s]", fontsize=7)
         self.ax_temp.set_ylabel("T [°C]", fontsize=7)
-        self.ax_temp.grid(True, alpha=0.3)
         self.ax_temp.tick_params(labelsize=7)
-        (self.line_temp,) = self.ax_temp.plot([], [], color="#c2410c", lw=1.2, label="T_DUT (misurata)")
-        (self.line_setpoint,) = self.ax_temp.plot([], [], color="#666666", lw=1.0, ls="--", alpha=0.8, label="Setpoint")
-        self.ax_temp.legend(loc="upper right", fontsize=6)
+        (self.line_temp,) = self.ax_temp.plot([], [], color=CLR_SERIES_ORANGE, lw=1.2, label="T_DUT (misurata)")
+        (self.line_setpoint,) = self.ax_temp.plot([], [], color=INK_MUTED, lw=1.0, ls="--", alpha=0.8, label="Setpoint")
+        self._style_legend(self.ax_temp.legend(loc="upper right", fontsize=6))
 
         self.canvas_rtu_temp = FigureCanvasTkAgg(self.fig_rtu_temp, master=body)
+        self.canvas_rtu_temp.get_tk_widget().configure(bg=BG_PANEL, highlightthickness=0)
         self.canvas_rtu_temp.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
         self.canvas_rtu_temp.draw()
 
@@ -269,7 +324,7 @@ class AntiSELDashboard(ctk.CTk):
         ctrl.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(ctrl, text="PID CTRL + RTU", font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=0, padx=15, pady=(6, 0))
-        ctk.CTkLabel(ctrl, text="(placeholder — TBD)", font=ctk.CTkFont(size=10), text_color="gray50").grid(row=1, column=0, padx=15)
+        ctk.CTkLabel(ctrl, text="(placeholder — TBD)", font=ctk.CTkFont(size=10), text_color=INK_MUTED).grid(row=1, column=0, padx=15)
 
         self.lbl_rtu_status = ctk.CTkLabel(ctrl, text="● non connesso", text_color="white", fg_color=CLR_DANGER,
                                            corner_radius=6, font=ctk.CTkFont(size=12, weight="bold"))
@@ -282,10 +337,10 @@ class AntiSELDashboard(ctk.CTk):
         ctk.CTkLabel(addr, text="Porta:").grid(row=1, column=0, padx=(0, 3), sticky="e")
         ctk.CTkEntry(addr, textvariable=self.rtu_port_val, width=60).grid(row=1, column=1, sticky="w")
 
-        self.btn_rtu_conn = ctk.CTkButton(ctrl, text="Connetti", command=self._rtu_toggle_connection)
+        self.btn_rtu_conn = ctk.CTkButton(ctrl, text="Connetti", fg_color=CLR_ACCENT_CONFIG, hover_color=CLR_ACCENT_CONFIG_HOVER, command=self._rtu_toggle_connection)
         self.btn_rtu_conn.grid(row=4, column=0, padx=15, pady=6)
 
-        mf = ctk.CTkFrame(ctrl, fg_color=("white", "gray20"), corner_radius=8)
+        mf = ctk.CTkFrame(ctrl, fg_color=BG_PANEL_RAISED, corner_radius=8)
         mf.grid(row=5, column=0, padx=15, pady=3, sticky="ew")
         self.metric_temp      = self._add_metric(mf, 0, "T_DUT [°C]", "—")
         self.metric_pwm       = self._add_metric(mf, 1, "PWM PID [%]", "—")
@@ -312,7 +367,7 @@ class AntiSELDashboard(ctk.CTk):
         self.btn_dut_off.pack(side="left", padx=4, expand=True, fill="x")
         self.btn_reset = ctk.CTkButton(act, text="RESET", width=64, fg_color=CLR_WARN, hover_color=CLR_WARN_HOVER, command=lambda: self._send_cmd("RESET"))
         self.btn_reset.pack(side="left", padx=4, expand=True, fill="x")
-        self.btn_ack = ctk.CTkButton(act, text="ACK FAULT", width=64, fg_color=CLR_WARN_HOVER, hover_color="#5c2a04", command=lambda: self._send_cmd("ACK FAULT"))
+        self.btn_ack = ctk.CTkButton(act, text="ACK FAULT", width=64, fg_color=CLR_WARN_DEEP, hover_color=CLR_WARN_DEEP_HOVER, command=lambda: self._send_cmd("ACK FAULT"))
         self.btn_ack.pack(side="left", padx=4, expand=True, fill="x")
         self.lbl_perm_warn = ctk.CTkLabel(sec, text="", text_color=CLR_DANGER, justify="left", font=ctk.CTkFont(size=12, weight="bold"))
 
@@ -513,42 +568,44 @@ class AntiSELDashboard(ctk.CTk):
 
         self.fig = Figure(figsize=(3.8, 9), dpi=100)
         self.fig.subplots_adjust(hspace=0.6, left=0.16, right=0.95, top=0.96, bottom=0.06)
+        self._style_figure(self.fig)
 
         self.ax_slow = self.fig.add_subplot(311)
+        self._style_axes(self.ax_slow)
         self.ax_slow.set_title("Corrente DUT (log 10 Hz)", fontsize=10)
         self.ax_slow.set_xlabel("t [s]", fontsize=8)
         self.ax_slow.set_ylabel("I [mA]", fontsize=8)
-        self.ax_slow.grid(True, alpha=0.3)
         self.ax_slow.tick_params(labelsize=8)
-        (self.line_slow,) = self.ax_slow.plot([], [], color="#2563eb", lw=1.2, label="I")
+        (self.line_slow,) = self.ax_slow.plot([], [], color=CLR_SERIES_BLUE, lw=1.2, label="I")
         (self.line_thr,) = self.ax_slow.plot([], [], color=CLR_DANGER, lw=1.0, ls="--", alpha=0.8, label="soglia (V_LIMIT)")
-        (self.line_slow_trace,) = self.ax_slow.plot([], [], color="#800080", lw=1.3, label="evento (100 kSa/s)")
-        self.ax_slow.legend(loc="upper right", fontsize=7)
+        (self.line_slow_trace,) = self.ax_slow.plot([], [], color=CLR_SERIES_VIOLET, lw=1.3, label="evento (100 kSa/s)")
+        self._style_legend(self.ax_slow.legend(loc="upper right", fontsize=7))
 
         self.ax_volt = self.fig.add_subplot(312)
+        self._style_axes(self.ax_volt)
         self.ax_volt.set_title("Tensione DUT (misurata)", fontsize=10)
         self.ax_volt.set_xlabel("t [s]", fontsize=8)
         self.ax_volt.set_ylabel("V [V]", fontsize=8)
-        self.ax_volt.grid(True, alpha=0.3)
         self.ax_volt.tick_params(labelsize=8)
-        (self.line_slow_v,) = self.ax_volt.plot([], [], color="#16a34a", lw=1.2, label="V")
+        (self.line_slow_v,) = self.ax_volt.plot([], [], color=CLR_SERIES_AQUA, lw=1.2, label="V")
 
         self.ax_trace = self.fig.add_subplot(313)
+        self._style_axes(self.ax_trace)
         self.ax_trace.set_title("Ultima traccia evento", fontsize=10)
         self.ax_trace.set_xlabel("t [us]", fontsize=8)
         self.ax_trace.set_ylabel("I [mA]", fontsize=8)
-        self.ax_trace.grid(True, alpha=0.3)
         self.ax_trace.tick_params(labelsize=8)
-        (self.line_trace,) = self.ax_trace.plot([], [], color="#800080", lw=1.0)
+        (self.line_trace,) = self.ax_trace.plot([], [], color=CLR_SERIES_VIOLET, lw=1.0)
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=p)
+        self.canvas.get_tk_widget().configure(bg=BG_PANEL, highlightthickness=0)
         self.canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
         self.canvas.draw()
 
     def _toggle_pause(self):
         self.plot_paused = not self.plot_paused
         self.btn_pause.configure(text="▶ Riprendi" if self.plot_paused else "⏸ Pausa",
-                                 fg_color="green" if self.plot_paused else "#1f6aa5")
+                                 fg_color=CLR_OK if self.plot_paused else CLR_ACCENT_CONFIG)
 
     def _clear_plots(self):
         self.slow_t.clear(); self.slow_i.clear(); self.slow_v.clear(); self.slow_thr.clear()
@@ -649,13 +706,13 @@ class AntiSELDashboard(ctk.CTk):
         self.log = ctk.CTkTextbox(parent, font=ctk.CTkFont(family="Courier", size=12), state="disabled", corner_radius=8)
         self.log.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="nsew")
         self.slow_log = ctk.CTkTextbox(parent, font=ctk.CTkFont(family="Courier", size=12), state="disabled",
-                                        fg_color="#F0F0F0", corner_radius=8)
+                                        fg_color=BG_PANEL_RAISED, corner_radius=8)
         self.slow_log.grid(row=1, column=1, padx=8, pady=(0, 8), sticky="nsew")
         self.log.tag_config("tx", foreground=CLR_ACCENT_CONFIG)
         self.log.tag_config("rx", foreground=CLR_OK)
         self.log.tag_config("info", foreground=CLR_WARN)
         self.log.tag_config("err", foreground=CLR_DANGER)
-        self.slow_log.tag_config("trace", foreground="#800080")
+        self.slow_log.tag_config("trace", foreground=CLR_SERIES_VIOLET)
 
     # ============================================================ CONNESSIONE
     def _toggle_connection(self):
@@ -692,7 +749,7 @@ class AntiSELDashboard(ctk.CTk):
         self.client.log_event("DISCONNECT")
         self.client.close_run_files()
         self.lbl_status.configure(text="● DISCONNESSO", fg_color=CLR_DANGER)
-        self.btn_conn.configure(text="Connetti", fg_color=["#3B8ED0", "#1F6AA5"], hover_color=["#36719F", "#144870"])
+        self.btn_conn.configure(text="Connetti", fg_color=CLR_ACCENT_CONFIG, hover_color=CLR_ACCENT_CONFIG_HOVER)
         self.btn_ping_loop.configure(fg_color="transparent")
         self._log("Disconnesso.", "info")
 
@@ -727,7 +784,7 @@ class AntiSELDashboard(ctk.CTk):
 
     def _rtu_on_disconnected(self):
         self.lbl_rtu_status.configure(text="● non connesso", fg_color=CLR_DANGER)
-        self.btn_rtu_conn.configure(text="Connetti RTU/PID", fg_color=["#3B8ED0", "#1F6AA5"], hover_color=["#36719F", "#144870"])
+        self.btn_rtu_conn.configure(text="Connetti RTU/PID", fg_color=CLR_ACCENT_CONFIG, hover_color=CLR_ACCENT_CONFIG_HOVER)
         self.metric_temp.configure(text="—")
         self.metric_pwm.configure(text="—")
         self.metric_pid_state.configure(text="—")
@@ -1005,7 +1062,7 @@ class AntiSELDashboard(ctk.CTk):
                       "RECOVERY", "VERIFY"):
             color = CLR_WARN
         else:
-            color = "gray10"
+            color = INK_SECONDARY
         self.metric_state.configure(text=name, text_color=color)
         if retry is not None:
             try:
@@ -1013,7 +1070,7 @@ class AntiSELDashboard(ctk.CTk):
             except (ValueError, AttributeError):
                 nmax = SEL_RETRY_MAX
             self.metric_retries.configure(text=f"{retry}/{nmax}",
-                                          text_color=CLR_DANGER if retry >= nmax else "gray10")
+                                          text_color=CLR_DANGER if retry >= nmax else INK_SECONDARY)
         self._set_permanent_off(name == "FAULT")
 
     def _set_permanent_off(self, perm):
@@ -1045,7 +1102,7 @@ class AntiSELDashboard(ctk.CTk):
             self.btn_ping_loop.configure(fg_color="transparent")
         else:
             self.ping_loop_active = True
-            self.btn_ping_loop.configure(fg_color="orange")
+            self.btn_ping_loop.configure(fg_color=CLR_WARN)
             threading.Thread(target=self._ping_loop_thread, daemon=True).start()
 
     def _ping_loop_thread(self):

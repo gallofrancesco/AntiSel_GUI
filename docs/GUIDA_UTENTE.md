@@ -48,6 +48,13 @@ python antisel_dashboard_eth.py
 
 ## 4. Layout dell'interfaccia
 
+La dashboard usa un **tema scuro** (superfici quasi nere, pannelli
+leggermente rilevati) in stile strumento da banco, con accenti colorati per
+distinguere a colpo d'occhio sezioni e serie dei grafici. I colori sono
+definiti in un unico blocco di costanti ("Design tokens") in cima a
+`antisel_dashboard_eth.py`; per personalizzare la palette è sufficiente
+modificare quei valori.
+
 La finestra è divisa in quattro colonne più un'area di log in basso:
 
 | Colonna | Contenuto |

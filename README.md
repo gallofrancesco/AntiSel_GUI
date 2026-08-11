@@ -3,10 +3,11 @@
 Applicazione grafica per il controllo e il monitoraggio di dispositivi
 **AntiSEL** via comunicazione Ethernet TCP/IP.
 
-Dashboard interattiva basata su **CustomTkinter** che consente di comunicare
-con la NUCLEO-H755ZI-Q via TCP socket, monitorare lo stato della connessione,
-inviare comandi, visualizzare grafici in tempo reale (log 10 Hz e tracce
-evento SEL/HCE) e mantenere un log cronologico di tutte le operazioni.
+Dashboard interattiva basata su **CustomTkinter**, con tema scuro in stile
+strumento da banco, che consente di comunicare con la NUCLEO-H755ZI-Q via TCP
+socket, monitorare lo stato della connessione, inviare comandi, visualizzare
+grafici in tempo reale (log 10 Hz e tracce evento SEL/HCE) e mantenere un log
+cronologico di tutte le operazioni.
 Include inoltre un pannello **PID CTRL / RTU** (placeholder, connessione TCP
 indipendente) per il monitoraggio della temperatura del DUT e l'impostazione
 del setpoint, in previsione dell'integrazione hardware descritta in Figura 1
