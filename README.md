@@ -22,7 +22,18 @@ python antisel_dashboard_eth.py
 ```
 
 L'indirizzo IP, la porta e il timeout di connessione si configurano in cima
-a `antisel_dashboard_eth.py` (`HOST`, `PORT`, `TIMEOUT`).
+a `nucleo_client.py` (`HOST`, `PORT`, `TIMEOUT`; per il link RTU/PID
+`RTU_HOST`, `RTU_PORT`, `RTU_TIMEOUT`).
+
+## Struttura del codice
+
+- **`antisel_dashboard_eth.py`** — front-end: widget CustomTkinter, layout,
+  grafici matplotlib. Nessuna logica di rete o protocollo.
+- **`nucleo_client.py`** — backend: client TCP verso Nucleo (`NucleoClient`)
+  e verso il link RTU/PID (`RtuClient`), parsing del protocollo, logging su
+  CSV, costanti di rete/elettriche e conversioni (mA ↔ DAC/ADC counts).
+- **`pid_controller.py`** — implementazione di riferimento del PID (non
+  eseguita dalla dashboard, vedi [protocollo comandi](docs/AntiSEL_Protocollo_Comandi.md#logica-di-controllo-raccomandata-per-il-pid-ctrl)).
 
 ## Documentazione
 

@@ -1,7 +1,8 @@
 # Protocollo comandi AntiSEL — v5 (Fase 1: transparent mode + config runtime)
 
 Documento di contratto tra **firmware CM7** (server TCP) e **dashboard Python**
-(`antisel_dashboard_eth.py`, client TCP).
+(client TCP implementato in `nucleo_client.py`, consumato dalla GUI
+`antisel_dashboard_eth.py`).
 
 - **Trasporto:** TCP, `192.168.1.100:7755`
 - **Encoding:** ASCII, un comando per riga, terminatore `\r\n`
@@ -185,8 +186,9 @@ Formato ipotizzato, in stile testuale coerente col resto del documento
 | `SET SETPOINT_C <°C>` | `OK SETPOINT_C=<°C>` (non ancora validata dalla GUI) |
 
 La GUI interroga `GET TEMP`/`GET PID` una volta al secondo dopo la
-connessione. Il parsing lato dashboard è in `_rtu_send_cmd` / `_poll_rtu_queue`
-in `antisel_dashboard_eth.py`.
+connessione (`RtuClient._poll_loop` in `nucleo_client.py`). Il parsing dei
+campi ricevuti e l'aggiornamento dei widget avvengono lato GUI in
+`_poll_rtu_queue` (`antisel_dashboard_eth.py`).
 
 ### Logica di controllo raccomandata per il PID CTRL
 

@@ -8,12 +8,15 @@ v4.5:
 - T_HOLD / T_ON come campi numerici
 Storia precedente (firmware latched, discriminazione ADC, controlli latch,
 grafici corrente/tensione + traccia) invariata.
+
+Front-end puro: widget, layout e plotting. La comunicazione TCP con la
+Nucleo e con il link RTU/PID, il protocollo, il logging su CSV e le
+conversioni elettriche vivono in nucleo_client.py.
 """
 
 import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
-import socket
 import threading
 import time
 import queue
@@ -23,31 +26,13 @@ matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-HOST    = "192.168.1.100"
-PORT    = 7755
-TIMEOUT = 3.0
-
-# Collegamento RTU/PID (Figura 1, rif. RD04): dispositivi non ancora
-# disponibili in laboratorio, IP/porta e protocollo sono TBD (§8.4).
-# Placeholder in stile testuale GET/SET/OK, coerente con quello della Nucleo,
-# pensato per essere sostituito quando le specifiche reali (o Modbus TCP)
-# saranno definite.
-RTU_HOST    = "192.168.1.101"
-RTU_PORT    = 7756
-RTU_TIMEOUT = 3.0
-RTU_POLL_S  = 1.0
-
-DAC_MAX_COUNTS = 4095    # DAC della Nucleo: 12 bit
-ADC_MAX_COUNTS = 65535   # ADC della Nucleo: 16 bit (ADC_RESOLUTION_16B)
-DEFAULT_FS     = 100000  # sample rate ADC [Sa/s], sovrascritto dall'header traccia
-VREF           = 3.3
-
-# Nomi stati allineati al firmware Fase 2 (macchina a 11 stati)
-STATE_NAMES = ["INIT", "IDLE", "ALARM", "HOLD_RUN", "HCE_SAVE", "CUTOFF",
-               "TON_RUN", "RECOVERY", "VERIFY", "MANUAL_OFF", "FAULT"]
-SEL_RETRY_MAX = 3
-
-I_TH_MIN, I_TH_MAX = 1.0, 50.0   # range soglia (R-02)
+from nucleo_client import (
+    NucleoClient, RtuClient, parse_kv,
+    voltage_to_counts, counts_to_mA,
+    HOST, PORT, RTU_HOST, RTU_PORT,
+    DAC_MAX_COUNTS, DEFAULT_FS, VREF,
+    STATE_NAMES, SEL_RETRY_MAX, I_TH_MIN, I_TH_MAX,
+)
 
 # ---------------------------------------------------------------- Design tokens
 # Palette semantica dei pulsanti/stati, usata ovunque al posto di colori
@@ -70,10 +55,6 @@ CLR_ACCENT_INFO    = "#52525b"
 CLR_CARD_PROTECT   = ("#fdf1f1", "#3a1f1f")
 CLR_CARD_CONFIG    = ("#f2f7fc", "#1c2733")
 CLR_CARD_INFO      = ("#f2f2f3", "#232326")
-
-
-def voltage_to_counts(v, vref=VREF):
-    return int(max(0, min(DAC_MAX_COUNTS, round(v / vref * DAC_MAX_COUNTS))))
 
 
 class AntiSELDashboard(ctk.CTk):
@@ -100,31 +81,17 @@ class AntiSELDashboard(ctk.CTk):
         win_h = max(780, min(int(screen_h * 0.85), 980))
         self.geometry(f"{win_w}x{win_h}")
 
-        # Stato
-        self.sock             = None
-        self.connected        = False
-        self.rx_queue         = queue.Queue()
-        self.rx_thread        = None
+        # Client di comunicazione (nucleo_client.py)
+        self.client     = NucleoClient(HOST, PORT)
+        self.rtu_client = RtuClient(RTU_HOST, RTU_PORT)
+
+        # Stato GUI
         self.ping_loop_active = False
         self.trace_active     = False
-        self.trace_file       = None
         self.trace_fs         = DEFAULT_FS
         self.trace_sample_idx = 0
-        self.log_csv          = None
-        self.events_csv       = None
-        self.ping_sent_time   = None
-        self._last_rtt        = None   # RTT misurato all'arrivo del PONG [ms]
         self.permanent_off    = False
-        self.tx_count = 0
-        self.rx_count = 0
         self.cur_dac  = 2048   # ultimo valore DAC (soglia attiva)
-
-        # Stato link RTU/PID (Figura 1, placeholder — vedi costanti RTU_*)
-        self.rtu_sock        = None
-        self.rtu_connected   = False
-        self.rtu_rx_queue    = queue.Queue()
-        self.rtu_rx_thread   = None
-        self.rtu_poll_active = False
 
         # Variabili
         self.r_shunt  = tk.StringVar(value="1.0")
@@ -339,13 +306,13 @@ class AntiSELDashboard(ctk.CTk):
         # --- Azioni DUT ---
         sec = self._section(p, r, "Azioni DUT", kind="protect"); r += 1
         act = ctk.CTkFrame(sec, fg_color="transparent"); act.pack(fill="x")
-        self.btn_dut_on = ctk.CTkButton(act, text="DUT ON", fg_color=CLR_OK, hover_color=CLR_OK_HOVER, command=lambda: self._send_cmd("DUT_ON"))
+        self.btn_dut_on = ctk.CTkButton(act, text="DUT ON", width=64, fg_color=CLR_OK, hover_color=CLR_OK_HOVER, command=lambda: self._send_cmd("DUT_ON"))
         self.btn_dut_on.pack(side="left", padx=4, expand=True, fill="x")
-        self.btn_dut_off = ctk.CTkButton(act, text="DUT OFF", fg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER, command=lambda: self._send_cmd("DUT_OFF"))
+        self.btn_dut_off = ctk.CTkButton(act, text="DUT OFF", width=64, fg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER, command=lambda: self._send_cmd("DUT_OFF"))
         self.btn_dut_off.pack(side="left", padx=4, expand=True, fill="x")
-        self.btn_reset = ctk.CTkButton(act, text="RESET", fg_color=CLR_WARN, hover_color=CLR_WARN_HOVER, command=lambda: self._send_cmd("RESET"))
+        self.btn_reset = ctk.CTkButton(act, text="RESET", width=64, fg_color=CLR_WARN, hover_color=CLR_WARN_HOVER, command=lambda: self._send_cmd("RESET"))
         self.btn_reset.pack(side="left", padx=4, expand=True, fill="x")
-        self.btn_ack = ctk.CTkButton(act, text="ACK FAULT", fg_color=CLR_WARN_HOVER, hover_color="#5c2a04", command=lambda: self._send_cmd("ACK FAULT"))
+        self.btn_ack = ctk.CTkButton(act, text="ACK FAULT", width=64, fg_color=CLR_WARN_HOVER, hover_color="#5c2a04", command=lambda: self._send_cmd("ACK FAULT"))
         self.btn_ack.pack(side="left", padx=4, expand=True, fill="x")
         self.lbl_perm_warn = ctk.CTkLabel(sec, text="", text_color=CLR_DANGER, justify="left", font=ctk.CTkFont(size=12, weight="bold"))
 
@@ -624,6 +591,13 @@ class AntiSELDashboard(ctk.CTk):
         except (ValueError, ZeroDivisionError):
             return 0.0
 
+    def _counts_to_mA(self, adc_raw):
+        try:
+            r = float(self.r_shunt.get()); g = float(self.ina_gain.get())
+        except ValueError:
+            return None
+        return counts_to_mA(adc_raw, r, g)
+
     def _refresh_plots(self):
         if self._plot_dirty and not self.plot_paused:
             self._plot_dirty = False
@@ -685,36 +659,19 @@ class AntiSELDashboard(ctk.CTk):
 
     # ============================================================ CONNESSIONE
     def _toggle_connection(self):
-        if self.connected:
+        if self.client.connected:
             self._disconnect()
         else:
             threading.Thread(target=self._connect, daemon=True).start()
 
     def _connect(self):
-        self._log(f"Connessione a {HOST}:{PORT}...", "info")
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(TIMEOUT)
-            s.connect((HOST, PORT))
-            s.settimeout(None)
-            self.sock = s
-            self.connected = True
+        self._log(f"Connessione a {self.client.host}:{self.client.port}...", "info")
+        if self.client.connect():
             self.after(0, self._on_connected)
-            self.rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
-            self.rx_thread.start()
-        except Exception as e:
-            self.rx_queue.put(("err", f"Connessione fallita: {e}"))
 
     def _disconnect(self):
         self.ping_loop_active = False
-        self.connected        = False
-        if self.sock:
-            try:
-                self.sock.shutdown(socket.SHUT_RDWR)
-                self.sock.close()
-            except Exception:
-                pass
-            self.sock = None
+        self.client.disconnect()
         self._on_disconnected()
 
     def _on_connected(self):
@@ -722,32 +679,18 @@ class AntiSELDashboard(ctk.CTk):
         self.btn_conn.configure(text="Disconnetti", fg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER)
         self._log("Connesso.", "info")
         try:
-            ts = time.strftime("%Y%m%d_%H%M%S")
-            prefix = f"{self._run_prefix()}_{ts}"
-            self.log_csv = open(f"{prefix}_log10hz.csv", "w")
-            self.log_csv.write("PC_Time,Tick_ms,ADC_raw,Current_mA,Fresh,State,Retry,SEL,HCE\n")
-            self.events_csv = open(f"{prefix}_events.csv", "w")
-            self.events_csv.write("PC_Time,Event,Detail\n")
+            prefix = self.client.open_run_files(self._run_prefix())
             self._log(f"File di run: {prefix}_*.csv", "info")
-            self._log_event("CONNECT", f"{HOST}:{PORT}")
+            self.client.log_event("CONNECT", f"{self.client.host}:{self.client.port}")
             self.slow_t.clear(); self.slow_i.clear(); self.slow_v.clear(); self.slow_thr.clear(); self.slow_t0 = None
             # Protocollo v5: invia la config elettrica/parametrica al firmware
             self._send_config()
         except Exception as e:
-            self.log_csv = None
-            self.events_csv = None
             self._log(f"Errore apertura file di run: {e}", "err")
 
     def _on_disconnected(self):
-        self._log_event("DISCONNECT")
-        if self.log_csv:
-            try: self.log_csv.close()
-            except Exception: pass
-            self.log_csv = None
-        if self.events_csv:
-            try: self.events_csv.close()
-            except Exception: pass
-            self.events_csv = None
+        self.client.log_event("DISCONNECT")
+        self.client.close_run_files()
         self.lbl_status.configure(text="● DISCONNESSO", fg_color=CLR_DANGER)
         self.btn_conn.configure(text="Connetti", fg_color=["#3B8ED0", "#1F6AA5"], hover_color=["#36719F", "#144870"])
         self.btn_ping_loop.configure(fg_color="transparent")
@@ -755,7 +698,7 @@ class AntiSELDashboard(ctk.CTk):
 
     # ============================================================ RTU/PID (Figura 1, placeholder)
     def _rtu_toggle_connection(self):
-        if self.rtu_connected:
+        if self.rtu_client.connected:
             self._rtu_disconnect()
         else:
             threading.Thread(target=self._rtu_connect, daemon=True).start()
@@ -765,34 +708,14 @@ class AntiSELDashboard(ctk.CTk):
             host = self.rtu_host_val.get().strip()
             port = int(self.rtu_port_val.get())
         except ValueError:
-            self.rtu_rx_queue.put(("err", "RTU/PID: IP o porta non validi."))
+            self.rtu_client.rx_queue.put(("err", "RTU/PID: IP o porta non validi."))
             return
         self._log(f"RTU/PID: connessione a {host}:{port}...", "info")
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(RTU_TIMEOUT)
-            s.connect((host, port))
-            s.settimeout(None)
-            self.rtu_sock = s
-            self.rtu_connected = True
+        if self.rtu_client.connect(host, port):
             self.after(0, self._rtu_on_connected)
-            self.rtu_rx_thread = threading.Thread(target=self._rtu_rx_loop, daemon=True)
-            self.rtu_rx_thread.start()
-            self.rtu_poll_active = True
-            threading.Thread(target=self._rtu_poll_loop, daemon=True).start()
-        except Exception as e:
-            self.rtu_rx_queue.put(("err", f"RTU/PID: connessione fallita: {e}"))
 
     def _rtu_disconnect(self):
-        self.rtu_poll_active = False
-        self.rtu_connected   = False
-        if self.rtu_sock:
-            try:
-                self.rtu_sock.shutdown(socket.SHUT_RDWR)
-                self.rtu_sock.close()
-            except Exception:
-                pass
-            self.rtu_sock = None
+        self.rtu_client.disconnect()
         self._rtu_on_disconnected()
 
     def _rtu_on_connected(self):
@@ -810,35 +733,9 @@ class AntiSELDashboard(ctk.CTk):
         self.metric_pid_state.configure(text="—")
         self._log("RTU/PID: disconnesso.", "info")
 
-    def _rtu_rx_loop(self):
-        try:
-            buffer = b""
-            while self.rtu_connected:
-                chunk = self.rtu_sock.recv(256)
-                if not chunk:
-                    break
-                buffer += chunk
-                while b"\n" in buffer:
-                    line, buffer = buffer.split(b"\n", 1)
-                    line = line.decode().strip()
-                    if line:
-                        self.rtu_rx_queue.put(("rx", line))
-        except Exception:
-            pass
-        finally:
-            if self.rtu_connected:
-                self.rtu_rx_queue.put(("err", "RTU/PID: connessione persa."))
-                self.rtu_connected = False
-                self.after(0, self._rtu_on_disconnected)
-
     def _rtu_send_cmd(self, cmd):
-        if not self.rtu_connected or not self.rtu_sock:
-            return
-        try:
-            self.rtu_sock.sendall((cmd + "\r\n").encode())
+        if self.rtu_client.send_cmd(cmd):
             self._log(f"RTU/PID -> {cmd}", "tx")
-        except Exception as e:
-            self._log(f"RTU/PID errore TX: {e}", "err")
 
     def _rtu_set_setpoint(self):
         try:
@@ -847,19 +744,12 @@ class AntiSELDashboard(ctk.CTk):
             return
         self._rtu_send_cmd(f"SET SETPOINT_C {sp:.1f}")
 
-    def _rtu_poll_loop(self):
-        """Interrogazione periodica di temperatura e stato PID (placeholder)."""
-        while self.rtu_poll_active and self.rtu_connected:
-            self._rtu_send_cmd("GET TEMP")
-            self._rtu_send_cmd("GET PID")
-            time.sleep(RTU_POLL_S)
-
     def _poll_rtu_queue(self):
         try:
             while True:
-                kind, msg = self.rtu_rx_queue.get_nowait()
+                kind, msg = self.rtu_client.rx_queue.get_nowait()
                 if kind == "rx":
-                    fields = self._parse_kv(msg)
+                    fields = parse_kv(msg)
                     if "TEMP" in fields:
                         try:
                             temp = float(fields["TEMP"])
@@ -887,44 +777,23 @@ class AntiSELDashboard(ctk.CTk):
                     self._log(f"RTU/PID <- {msg}", "rx")
                 elif kind == "err":
                     self._log(msg, "err")
+                elif kind == "disconnected":
+                    self._log(msg, "err")
+                    self._rtu_on_disconnected()
         except queue.Empty:
             pass
         self.after(40, self._poll_rtu_queue)
 
     def _on_close(self):
-        if self.connected:
+        if self.client.connected:
             self._disconnect()
-        if self.rtu_connected:
+        if self.rtu_client.connected:
             self._rtu_disconnect()
         self.destroy()
 
     # ================================================================== I/O
-    def _rx_loop(self):
-        try:
-            buffer = b""
-            while self.connected:
-                chunk = self.sock.recv(256)
-                if not chunk:
-                    break
-                buffer += chunk
-                while b"\n" in buffer:
-                    line, buffer = buffer.split(b"\n", 1)
-                    line = line.decode().strip()
-                    if line:
-                        # RTT misurato qui (arrivo pacchetto), non nel polling GUI
-                        if line.startswith("PONG") and self.ping_sent_time is not None:
-                            self._last_rtt = (time.time() - self.ping_sent_time) * 1000.0
-                        self.rx_queue.put(("rx", line))
-        except Exception:
-            pass
-        finally:
-            if self.connected:
-                self.rx_queue.put(("err", "Connessione persa."))
-                self.connected = False
-                self.after(0, self._on_disconnected)
-
     def _send_cmd(self, cmd):
-        if not self.connected or not self.sock:
+        if not self.client.connected:
             return
         if self.permanent_off and cmd.strip().upper().startswith(("DUT_ON", "SWITCH ON")):
             if not messagebox.askyesno(
@@ -934,21 +803,16 @@ class AntiSELDashboard(ctk.CTk):
                     "Inviare comunque?"):
                 self._log("Accensione annullata (DUT in FAULT).", "info")
                 return
-        try:
-            if cmd == "PING":
-                self.ping_sent_time = time.time()
-            self.sock.sendall((cmd + "\r\n").encode())
-            self.tx_count += 1
-            self.after(0, lambda: self.metric_tx.configure(text=str(self.tx_count)))
-            if not cmd.startswith("DAC_SET"):
-                self._log(f"-> {cmd}", "tx")
-            if cmd.startswith(("DUT_ON", "DUT_OFF", "RESET", "TH_SELECT",
-                               "TH_LOAD", "THOLD_SET", "TON_SET",
-                               "INA_RST", "RETRY_SET", "TCLEAR_SET")):
-                parts = cmd.split(None, 1)
-                self._log_event(parts[0], parts[1] if len(parts) > 1 else "")
-        except Exception as e:
-            self._log(f"Errore TX: {e}", "err")
+        if not self.client.send_cmd(cmd):
+            return
+        self.after(0, lambda: self.metric_tx.configure(text=str(self.client.tx_count)))
+        if not cmd.startswith("DAC_SET"):
+            self._log(f"-> {cmd}", "tx")
+        if cmd.startswith(("DUT_ON", "DUT_OFF", "RESET", "TH_SELECT",
+                           "TH_LOAD", "THOLD_SET", "TON_SET",
+                           "INA_RST", "RETRY_SET", "TCLEAR_SET")):
+            parts = cmd.split(None, 1)
+            self.client.log_event(parts[0], parts[1] if len(parts) > 1 else "")
 
     def _send_manual(self):
         cmd = self.entry_cmd.get().strip()
@@ -959,10 +823,10 @@ class AntiSELDashboard(ctk.CTk):
     def _poll_rx_queue(self):
         try:
             while True:
-                kind, msg = self.rx_queue.get_nowait()
+                kind, msg = self.client.rx_queue.get_nowait()
                 if kind == "rx":
                     if msg.startswith("LOG_10HZ"):
-                        fields = self._parse_kv(msg)
+                        fields = parse_kv(msg)
                         try:
                             st = int(fields.get("STATE", -1))
                             ret = int(fields["RETRY"]) if "RETRY" in fields else None
@@ -980,9 +844,8 @@ class AntiSELDashboard(ctk.CTk):
                                 if "I_MA" in fields:
                                     i_mA = float(fields["I_MA"])
                                 else:
-                                    try:
-                                        i_mA = float(self._counts_to_mA(adc_raw))
-                                    except ValueError:
+                                    i_mA = self._counts_to_mA(adc_raw)
+                                    if i_mA is None:
                                         i_mA = 0.0
                                 if "THR_MA" in fields:
                                     thr = float(fields["THR_MA"])
@@ -999,13 +862,11 @@ class AntiSELDashboard(ctk.CTk):
                                     self._plot_dirty = True
                                 except ValueError:
                                     pass
-                                if self.log_csv:
-                                    pc_ts = time.strftime("%Y-%m-%dT%H:%M:%S") + f".{int((now % 1) * 1000):03d}"
-                                    self.log_csv.write(
-                                        f"{pc_ts},{fields.get('TICK', '')},{adc_raw},{i_mA},"
-                                        f"{fields.get('FRESH', '')},{fields.get('STATE', '')},"
-                                        f"{fields.get('RETRY', '')},{fields.get('SEL', '')},{fields.get('HCE', '')}\n"
-                                    )
+                                pc_ts = time.strftime("%Y-%m-%dT%H:%M:%S") + f".{int((now % 1) * 1000):03d}"
+                                self.client.write_log_row(
+                                    pc_ts, fields.get("TICK", ""), adc_raw, i_mA,
+                                    fields.get("FRESH", ""), fields.get("STATE", ""),
+                                    fields.get("RETRY", ""), fields.get("SEL", ""), fields.get("HCE", ""))
                         except Exception:
                             pass
                         self._log_slow(msg)
@@ -1021,22 +882,17 @@ class AntiSELDashboard(ctk.CTk):
                         self.trace_overlay_t0 = (time.time() - self.slow_t0) if self.slow_t0 is not None else None
                         _tk = msg.split()
                         self.trace_lbl = _tk[1] if len(_tk) > 1 else "EVT"
-                        fields = self._parse_kv(msg)
+                        fields = parse_kv(msg)
                         try:
                             self.trace_fs = int(fields.get("FS", DEFAULT_FS))
                         except Exception:
                             self.trace_fs = DEFAULT_FS
                         self._log_slow(f"--- {msg} ---", "trace")
                         try:
-                            ts = time.strftime("%Y%m%d_%H%M%S")
-                            ev = self.trace_lbl
-                            fname = f"{self._run_prefix()}_{ts}_trace_{ev}.csv"
-                            self.trace_file = open(fname, "w")
-                            self.trace_file.write(f"# {msg}\n")
-                            self.trace_file.write(f"# PC_Time: {time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
-                            self.trace_file.write(f"# R_SHUNT_ohm: {self.r_shunt.get()}  INA_GAIN: {self.ina_gain.get()}\n")
-                            self.trace_file.write("Time_us,ADC_raw,Current_mA\n")
-                            self._log_event("TRACE", f"{ev} {fname}")
+                            fname = self.client.open_trace_file(
+                                self._run_prefix(), self.trace_lbl, msg,
+                                self.r_shunt.get(), self.ina_gain.get())
+                            self.client.log_event("TRACE", f"{self.trace_lbl} {fname}")
                         except Exception as e:
                             self._log(f"Errore file traccia: {e}", "err")
                         continue
@@ -1051,9 +907,7 @@ class AntiSELDashboard(ctk.CTk):
                             self.trace_overlay_segments.append(self._trace_overlay_acc)
                             self._trace_overlay_acc = []
                             self._plot_dirty = True
-                        if self.trace_file:
-                            self.trace_file.close()
-                            self.trace_file = None
+                        self.client.close_trace_file()
                         continue
                     elif self.trace_active:
                         try:
@@ -1062,6 +916,8 @@ class AntiSELDashboard(ctk.CTk):
                                 idx = int(parts[0]); adc_raw = int(parts[1])
                                 time_us = idx * 1e6 / self.trace_fs
                                 i_mA = self._counts_to_mA(adc_raw)
+                                if i_mA is None:
+                                    i_mA = ""
                                 try:
                                     self._trace_acc.append((time_us, float(i_mA)))
                                     if self.trace_overlay_t0 is not None:
@@ -1070,32 +926,32 @@ class AntiSELDashboard(ctk.CTk):
                                         )
                                 except ValueError:
                                     pass
-                                if self.trace_file:
-                                    self.trace_file.write(f"{time_us:.1f},{adc_raw},{i_mA}\n")
+                                self.client.write_trace_row(time_us, adc_raw, i_mA)
                                 self.trace_sample_idx += 1
-                            elif self.trace_file:
-                                self.trace_file.write(f"# {msg}\n")
+                            else:
+                                self.client.write_trace_comment(msg)
                         except Exception:
                             pass
                         continue
 
                     if msg == "PONG" or msg.startswith("PONG"):
-                        if self._last_rtt is not None:
-                            self.ping_sent_time = None
-                            self.metric_ping.configure(text=f"{self._last_rtt:.1f} ms")
-                            self._log(f"<- {msg}  [{self._last_rtt:.1f} ms]", "rx")
-                            self._last_rtt = None
+                        if self.client.last_rtt is not None:
+                            self.client.ping_sent_time = None
+                            rtt = self.client.last_rtt
+                            self.metric_ping.configure(text=f"{rtt:.1f} ms")
+                            self._log(f"<- {msg}  [{rtt:.1f} ms]", "rx")
+                            self.client.last_rtt = None
                         else:
                             self._log(f"<- {msg}", "rx")
-                        self.rx_count += 1
-                        self.metric_rx.configure(text=str(self.rx_count))
+                        self.client.rx_count += 1
+                        self.metric_rx.configure(text=str(self.client.rx_count))
                         continue
 
-                    self.rx_count += 1
-                    self.metric_rx.configure(text=str(self.rx_count))
+                    self.client.rx_count += 1
+                    self.metric_rx.configure(text=str(self.client.rx_count))
 
                     if msg.startswith("OK STATUS="):
-                        f = self._parse_kv(msg)
+                        f = parse_kv(msg)
                         try:
                             self._set_state_ui(f.get("STATUS", "—"),
                                                int(f["RETRY"]) if "RETRY" in f else None)
@@ -1119,7 +975,7 @@ class AntiSELDashboard(ctk.CTk):
 
                     if msg.startswith("TH_SELECT="):
                         try:
-                            f2 = self._parse_kv(msg)
+                            f2 = parse_kv(msg)
                             self.cur_dac = int(f2.get("DAC", self.cur_dac))
                             self.metric_dac.configure(text=str(self.cur_dac))
                             self.metric_dacv.configure(text=f"{self.cur_dac / DAC_MAX_COUNTS * VREF:.2f} V")
@@ -1130,20 +986,14 @@ class AntiSELDashboard(ctk.CTk):
                         self._log(f"<- {msg}", "rx")
                 elif kind == "err":
                     self._log(msg, "err")
+                elif kind == "disconnected":
+                    self._log(msg, "err")
+                    self._on_disconnected()
         except queue.Empty:
             pass
         self.after(40, self._poll_rx_queue)
 
     # ============================================================ HELPERS
-    @staticmethod
-    def _parse_kv(msg):
-        out = {}
-        for tok in msg.split():
-            if "=" in tok:
-                k, v = tok.split("=", 1)
-                out[k] = v
-        return out
-
     def _set_state_ui(self, state, retry=None):
         if isinstance(state, int):
             name = STATE_NAMES[state] if 0 <= state < len(STATE_NAMES) else str(state)
@@ -1181,29 +1031,12 @@ class AntiSELDashboard(ctk.CTk):
             self.btn_dut_on.configure(state="normal")
             self.lbl_perm_warn.pack_forget()
 
-    def _counts_to_mA(self, adc_raw):
-        try:
-            r = float(self.r_shunt.get()); g = float(self.ina_gain.get())
-            v_adc = (adc_raw / ADC_MAX_COUNTS) * VREF
-            return f"{(v_adc / (r * g)) * 1000.0:.3f}"
-        except (ValueError, ZeroDivisionError):
-            return ""
-
     def _run_prefix(self):
         def clean(s):
             s = s.strip().replace(" ", "-")
             s = "".join(ch for ch in s if ch.isalnum() or ch in "-_.")
             return s or "NA"
         return f"{clean(self.dut_id.get())}_{clean(self.let_id.get())}_{clean(self.run_id.get())}"
-
-    def _log_event(self, event, detail=""):
-        if self.events_csv:
-            try:
-                pc_ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-                self.events_csv.write(f"{pc_ts},{event},{detail}\n")
-                self.events_csv.flush()
-            except Exception:
-                pass
 
     # ============================================================ PING LOOP
     def _toggle_ping_loop(self):
@@ -1216,11 +1049,11 @@ class AntiSELDashboard(ctk.CTk):
             threading.Thread(target=self._ping_loop_thread, daemon=True).start()
 
     def _ping_loop_thread(self):
-        while self.ping_loop_active and self.connected:
+        while self.ping_loop_active and self.client.connected:
             try:
                 self._send_cmd("PING")
             except Exception as e:
-                self.rx_queue.put(("err", f"Ping loop error: {e}"))
+                self.client.rx_queue.put(("err", f"Ping loop error: {e}"))
                 self.ping_loop_active = False
                 break
             time.sleep(1.0)

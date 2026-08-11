@@ -4,6 +4,12 @@ Guida pratica all'uso della dashboard `antisel_dashboard_eth.py`: applicazione
 desktop (CustomTkinter) per il controllo e il monitoraggio via Ethernet TCP/IP
 del sistema di protezione AntiSEL su NUCLEO-H755ZI-Q.
 
+Il codice è diviso in due moduli: `antisel_dashboard_eth.py` (front-end —
+widget, layout, grafici) e `nucleo_client.py` (backend — client TCP verso
+Nucleo e RTU/PID, protocollo, logging CSV, conversioni elettriche). Questa
+guida riguarda l'uso dell'applicazione; i riferimenti a costanti come
+`HOST`/`PORT`/`RTU_HOST`/`RTU_PORT` sono ora in `nucleo_client.py`.
+
 Per il contratto di comunicazione firmware ↔ GUI vedi
 [AntiSEL_Protocollo_Comandi.md](AntiSEL_Protocollo_Comandi.md). Per la
 descrizione funzionale del sistema vedi
@@ -23,7 +29,7 @@ Requisiti: Python 3.7+ (Tkinter incluso nella stdlib), `customtkinter`,
 
 ## 2. Configurazione di rete
 
-L'indirizzo del dispositivo è definito in cima a `antisel_dashboard_eth.py`:
+L'indirizzo del dispositivo è definito in cima a `nucleo_client.py`:
 
 ```python
 HOST    = "192.168.1.100"   # IP della NUCLEO-H755ZI-Q
@@ -152,7 +158,7 @@ agganciato quando l'hardware sarà definito.
 
 - **IP / Porta**: indirizzo TCP del link RTU/PID, indipendente da quello
   della Nucleo (default `192.168.1.101:7756`, costanti `RTU_HOST`/`RTU_PORT`
-  in cima al file).
+  in cima a `nucleo_client.py`).
 - **Connetti/Disconnetti**: apre/chiude una connessione TCP separata da
   quella della Nucleo (thread RX dedicato, non interferisce col resto della
   dashboard).
@@ -163,8 +169,9 @@ agganciato quando l'hardware sarà definito.
   AD2 §3); **Set setpoint** invia `SET SETPOINT_C <valore>`.
 
 Quando le specifiche reali di PID CTRL e RTU saranno disponibili (protocollo
-testuale, Modbus TCP o altro), è sufficiente aggiornare il parsing in
-`_rtu_send_cmd`/`_poll_rtu_queue` senza modificare il resto della dashboard.
+testuale, Modbus TCP o altro), è sufficiente aggiornare `RtuClient` in
+`nucleo_client.py` (e il parsing dei campi in `_poll_rtu_queue` lato GUI)
+senza modificare il resto della dashboard.
 
 La logica di controllo raccomandata per il PID CTRL reale (anti-windup,
 frequenza di aggiornamento, guadagni) è descritta in
@@ -220,7 +227,7 @@ Sintassi completa, range di validazione e formati di telemetria asincrona
 
 ## 8. Risoluzione problemi
 
-1. Verificare `HOST`/`PORT` in `antisel_dashboard_eth.py`.
+1. Verificare `HOST`/`PORT` in `nucleo_client.py`.
 2. Verificare la raggiungibilità del dispositivo (`ping <HOST>` da terminale).
 3. Controllare il log applicazione (area in basso, righe rosse = errori).
 4. Se il DUT risulta bloccato in `FAULT`/spegnimento permanente, usare
