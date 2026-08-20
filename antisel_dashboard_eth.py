@@ -23,6 +23,7 @@ import queue
 from collections import deque
 import matplotlib
 matplotlib.use("TkAgg")
+import matplotlib.ticker as ticker
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
@@ -581,6 +582,8 @@ class AntiSELDashboard(ctk.CTk):
         self.ax_slow.set_title("Corrente DUT (log 10 Hz)", fontsize=10)
         self.ax_slow.set_xlabel("t [s]", fontsize=8)
         self.ax_slow.set_ylabel("I [mA]", fontsize=8)
+        self.ax_slow.yaxis.set_major_locator(ticker.MaxNLocator(nbins=12))
+        self.ax_slow.yaxis.set_minor_locator(ticker.AutoMinorLocator())
         self.ax_slow.tick_params(labelsize=10)
         (self.line_slow,) = self.ax_slow.plot([], [], color=CLR_SERIES_BLUE, lw=1.2, label="I")
         (self.line_thr,) = self.ax_slow.plot([], [], color=CLR_DANGER, lw=1.0, ls="--", alpha=0.8, label="soglia (V_LIMIT)")
