@@ -162,6 +162,12 @@ class AntiSELDashboard(ctk.CTk):
         self.trace_overlay_t0 = None
         self._plot_dirty = False
         self.plot_paused = False
+        self._zoomed_slow = False
+        self._zoomed_volt = False
+        self._pan_start = None
+        self._pan_axes = None
+        self._pan_xlim = None
+        self._pan_ylim = None
 
         # Buffer grafico temperatura (link RTU/PID, placeholder)
         self.rtu_t    = deque(maxlen=600)
@@ -569,9 +575,13 @@ class AntiSELDashboard(ctk.CTk):
         toolbar = ctk.CTkFrame(p, fg_color="transparent")
         toolbar.grid(row=0, column=0, sticky="ew", padx=6, pady=(0, 2))
         ctk.CTkLabel(toolbar, text="Grafici", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=(2, 12))
-        self.btn_pause = ctk.CTkButton(toolbar, text="⏸ Pausa", width=90, command=self._toggle_pause)
-        self.btn_pause.pack(side="left", padx=4)
-        ctk.CTkButton(toolbar, text="Azzera", width=80, fg_color=CLR_NEUTRAL, hover_color=CLR_NEUTRAL_HOVER, command=self._clear_plots).pack(side="left", padx=4)
+        self.btn_pause = ctk.CTkButton(toolbar, text="⏸ Pausa", width=70, command=self._toggle_pause)
+        self.btn_pause.pack(side="left", padx=2)
+
+        self.btn_auto = ctk.CTkButton(toolbar, text="🔄 Auto Zoom", width=90, fg_color=CLR_ACCENT_CONFIG, hover_color=CLR_ACCENT_CONFIG_HOVER, command=self._reset_zoom)
+        self.btn_auto.pack(side="left", padx=2)
+
+        ctk.CTkButton(toolbar, text="Azzera", width=60, fg_color=CLR_NEUTRAL, hover_color=CLR_NEUTRAL_HOVER, command=self._clear_plots).pack(side="left", padx=2)
 
         self.fig = Figure(figsize=(3.8, 5.0), dpi=100)
         self.fig.subplots_adjust(hspace=0.35, left=0.16, right=0.95, top=0.96, bottom=0.06)
@@ -599,6 +609,7 @@ class AntiSELDashboard(ctk.CTk):
         (self.line_slow_v,) = self.ax_volt.plot([], [], color=CLR_SERIES_AQUA, lw=1.2, label="V")
 
         self.ax_trace = self.fig.add_subplot(313)
+        self.ax_trace.set_navigate(False)
         self._style_axes(self.ax_trace)
         self.ax_trace.set_title("Ultima traccia evento", fontsize=10)
         self.ax_trace.set_xlabel("t [us]", fontsize=8)
@@ -609,6 +620,12 @@ class AntiSELDashboard(ctk.CTk):
         self.canvas = FigureCanvasTkAgg(self.fig, master=p)
         self.canvas.get_tk_widget().configure(bg=BG_PANEL, highlightthickness=0)
         self.canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+        
+        self.canvas.mpl_connect("scroll_event", self._on_scroll)
+        self.canvas.mpl_connect("button_press_event", self._on_press)
+        self.canvas.mpl_connect("button_release_event", self._on_release)
+        self.canvas.mpl_connect("motion_notify_event", self._on_drag)
+        
         self.canvas.draw()
 
     def _toggle_pause(self):
@@ -616,7 +633,86 @@ class AntiSELDashboard(ctk.CTk):
         self.btn_pause.configure(text="▶ Riprendi" if self.plot_paused else "⏸ Pausa",
                                  fg_color=CLR_OK if self.plot_paused else CLR_ACCENT_CONFIG)
 
+    def _on_scroll(self, event):
+        if event.inaxes not in (self.ax_slow, self.ax_volt):
+            return
+        
+        ax = event.inaxes
+        cur_xlim = ax.get_xlim()
+        cur_ylim = ax.get_ylim()
+        
+        xdata = event.xdata
+        ydata = event.ydata
+        if xdata is None or ydata is None:
+            return
+
+        if ax == self.ax_slow:
+            self._zoomed_slow = True
+        elif ax == self.ax_volt:
+            self._zoomed_volt = True
+        self.btn_auto.configure(fg_color=CLR_NEUTRAL)
+
+        base_scale = 1.2
+        if event.button == 'up':
+            scale_factor = 1 / base_scale
+        elif event.button == 'down':
+            scale_factor = base_scale
+        else:
+            scale_factor = 1
+
+        new_width = (cur_xlim[1] - cur_xlim[0]) * scale_factor
+        new_height = (cur_ylim[1] - cur_ylim[0]) * scale_factor
+
+        relx = (cur_xlim[1] - xdata) / (cur_xlim[1] - cur_xlim[0])
+        rely = (cur_ylim[1] - ydata) / (cur_ylim[1] - cur_ylim[0])
+
+        ax.set_xlim([xdata - new_width * (1 - relx), xdata + new_width * relx])
+        ax.set_ylim([ydata - new_height * (1 - rely), ydata + new_height * rely])
+        self.canvas.draw_idle()
+
+    def _on_press(self, event):
+        if event.inaxes not in (self.ax_slow, self.ax_volt):
+            return
+        if event.button == 1:
+            self._pan_start = (event.x, event.y)
+            self._pan_axes = event.inaxes
+            self._pan_xlim = event.inaxes.get_xlim()
+            self._pan_ylim = event.inaxes.get_ylim()
+
+    def _on_drag(self, event):
+        if not getattr(self, '_pan_start', None) or not getattr(self, '_pan_axes', None):
+            return
+            
+        ax = self._pan_axes
+        if ax == self.ax_slow:
+            self._zoomed_slow = True
+        elif ax == self.ax_volt:
+            self._zoomed_volt = True
+        self.btn_auto.configure(fg_color=CLR_NEUTRAL)
+        x0, y0 = ax.transData.inverted().transform(self._pan_start)
+        x1, y1 = ax.transData.inverted().transform((event.x, event.y))
+        
+        dx = x1 - x0
+        dy = y1 - y0
+
+        ax.set_xlim([self._pan_xlim[0] - dx, self._pan_xlim[1] - dx])
+        ax.set_ylim([self._pan_ylim[0] - dy, self._pan_ylim[1] - dy])
+        self.canvas.draw_idle()
+
+    def _on_release(self, event):
+        self._pan_start = None
+        self._pan_axes = None
+
+    def _reset_zoom(self):
+        self._zoomed_slow = False
+        self._zoomed_volt = False
+        self.btn_auto.configure(fg_color=CLR_ACCENT_CONFIG)
+        self.ax_slow.autoscale(enable=True, axis='both')
+        self.ax_volt.autoscale(enable=True, axis='both')
+        self._plot_dirty = True
+
     def _clear_plots(self):
+        self._reset_zoom()
         self.slow_t.clear(); self.slow_i.clear(); self.slow_v.clear(); self.slow_thr.clear()
         self.slow_t0 = None
         self.trace_x = []; self.trace_y = []
@@ -685,8 +781,11 @@ class AntiSELDashboard(ctk.CTk):
                         oy.extend(p[1] for p in seg)
                     self.line_slow_trace.set_data(ox, oy)
                     self.line_slow_v.set_data(list(self.slow_t), list(self.slow_v))
-                    self.ax_slow.relim(); self.ax_slow.autoscale_view()
-                    self.ax_volt.relim(); self.ax_volt.autoscale_view()
+                    
+                    if not getattr(self, '_zoomed_slow', False):
+                        self.ax_slow.relim(); self.ax_slow.autoscale_view()
+                    if not getattr(self, '_zoomed_volt', False):
+                        self.ax_volt.relim(); self.ax_volt.autoscale_view()
                 if self.trace_x:
                     self.line_trace.set_data(self.trace_x, self.trace_y)
                     self.ax_trace.set_title(f"Ultima traccia evento — {self.trace_lbl}", fontsize=10)

@@ -23,7 +23,7 @@ TIMEOUT = 3.0
 # specifiche reali (o Modbus TCP) saranno definite.
 RTU_HOST    = "192.168.1.101"
 RTU_PORT    = 7756
-RTU_TIMEOUT = 3.0
+RTU_TIMEOUT = 10.0
 RTU_POLL_S  = 1.0
 
 DAC_MAX_COUNTS = 4095    # DAC della Nucleo: 12 bit
@@ -89,7 +89,22 @@ class NucleoClient:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(self.timeout)
             s.connect((self.host, self.port))
-            s.settimeout(None)
+            
+            # Abilita TCP Keep-Alive aggressivo (rileva disconnessione cavo in ~4 sec)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            try:
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+                s.setsockopt(socket.IPPROTO_TCP, 18, 4000) # TCP_USER_TIMEOUT = 4 sec
+            except AttributeError:
+                pass
+            try:
+                s.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 1000, 1000))
+            except (AttributeError, OSError):
+                pass
+
+            # s.settimeout(None)  <-- Rimosso per permettere a recv() di lanciare socket.timeout
             self.sock = s
             self.connected = True
             self.rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
@@ -233,7 +248,22 @@ class RtuClient:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(self.timeout)
             s.connect((self.host, self.port))
-            s.settimeout(None)
+            
+            # Abilita TCP Keep-Alive aggressivo (rileva disconnessione cavo in ~4 sec)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            try:
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+                s.setsockopt(socket.IPPROTO_TCP, 18, 4000) # TCP_USER_TIMEOUT = 4 sec
+            except AttributeError:
+                pass
+            try:
+                s.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 1000, 1000))
+            except (AttributeError, OSError):
+                pass
+
+            # s.settimeout(None)  <-- Rimosso per permettere a recv() di lanciare socket.timeout
             self.sock = s
             self.connected = True
             self.rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
