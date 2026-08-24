@@ -29,16 +29,23 @@ Requisiti: Python 3.7+ (Tkinter incluso nella stdlib), `customtkinter`,
 
 ## 2. Configurazione di rete
 
-L'indirizzo del dispositivo è definito in cima a `nucleo_client.py`:
+Gli indirizzi di rete predefiniti dei dispositivi sono definiti in cima a `nucleo_client.py`:
 
 ```python
+# --- Rete scheda principale (Protezione DUT) ---
 HOST    = "192.168.1.100"   # IP della NUCLEO-H755ZI-Q
 PORT    = 7755              # porta TCP del server firmware
-TIMEOUT = 3.0                # timeout socket [s]
+TIMEOUT = 3.0               # timeout socket [s]
+
+# --- Rete scheda termoregolatore (Link RTU/PID) ---
+RTU_HOST    = "192.168.1.101" # IP della scheda termoregolatore
+RTU_PORT    = 7756            # porta TCP termoregolatore
+RTU_TIMEOUT = 10.0            # timeout socket [s]
 ```
 
-Modificare questi valori (e rilanciare l'app) se il dispositivo ha un IP o
-una porta diversi.
+Modificare questi valori (e rilanciare l'app) se i dispositivi hanno un IP o
+una porta predefinita diversa. 
+*Nota bene*: L'indirizzo e la porta del modulo RTU/PID possono essere modificati e applicati al volo anche direttamente dall'interfaccia grafica.
 
 ## 3. Avvio
 
@@ -147,11 +154,16 @@ l'acquisizione per ottenere nomi file riconoscibili.
 
 ### 4.9 Grafici
 
-- **Grafico continuo**: traccia `I_MA`/soglia nel tempo a partire dai
-  messaggi `LOG_10HZ`; supporto pausa/ripresa e pulizia.
+- **Grafici continui (Corrente e Tensione)**: tracciano i valori nel tempo a partire dai
+  messaggi `LOG_10HZ`; supporto pausa/ripresa e pulizia. I grafici scorrono automaticamente (autoscale).
+  - **Navigazione mouse**: è possibile ispezionare i grafici interattivamente:
+    - **Rotellina (Scroll)**: per ingrandire/rimpicciolire (Zoom) centrato sul cursore.
+    - **Clicca e trascina (Pan)**: per spostare liberamente l'area visibile.
+  - Interagendo con uno dei due grafici, solo il grafico interessato **sospende temporaneamente lo scorrimento automatico** per facilitare l'analisi dei dati, mentre l'altro grafico prosegue l'aggiornamento.
+  - Per ripristinare lo scorrimento automatico su tutti i grafici, usare il pulsante **🔄 Auto Zoom** nella barra degli strumenti.
 - **Grafico traccia evento**: mostra l'ultima traccia ad alta risoluzione
   (`TRACE_START`…`TRACE_END`) con overlay sul grafico continuo nel punto
-  temporale corretto.
+  temporale corretto. La navigazione libera è bloccata su questo grafico per non perderne l'inquadratura.
 
 ### 4.10 Pannello PID CTRL / RTU (placeholder)
 
@@ -242,3 +254,7 @@ Sintassi completa, range di validazione e formati di telemetria asincrona
 5. Il pannello **PID CTRL / RTU** è un placeholder (§4.10): se non compaiono
    letture non è un malfunzionamento, ma la semplice assenza del dispositivo
    reale (protocollo/IP ancora da definire).
+6. **Disconnessioni del cavo di rete**: Il software implementa un TCP Keep-Alive
+   aggressivo e un watchdog a livello applicativo (multipiattaforma). Qualsiasi disconnessione
+   fisica del cavo LAN viene rilevata in modo sicuro in circa 3-4 secondi e
+   la GUI si scollegherà da sola. Basterà ricollegare il cavo e cliccare **Connetti**.
