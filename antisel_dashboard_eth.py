@@ -332,7 +332,11 @@ class AntiSELDashboard(ctk.CTk):
         self.canvas_rtu_temp.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
         self.canvas_rtu_temp.draw()
 
-        ctrl = ctk.CTkFrame(body, fg_color="transparent")
+        # Scorrevole: la meta' inferiore ha altezza fissa (uniform="rtu_split"
+        # sopra), ma l'elenco di controlli puo' superarla (es. dopo l'aggiunta
+        # di nuovi pulsanti) — senza scroll gli elementi in fondo finiscono
+        # oltre il bordo della finestra e diventano irraggiungibili.
+        ctrl = ctk.CTkScrollableFrame(body, fg_color="transparent")
         ctrl.grid(row=1, column=0, sticky="nsew")
         ctrl.grid_columnconfigure(0, weight=1)
 
@@ -359,11 +363,17 @@ class AntiSELDashboard(ctk.CTk):
         self.metric_pwm       = self._add_metric(mf, 1, "PWM PID [%]", "—")
         self.metric_pid_state = self._add_metric(mf, 2, "Stato PID", "—")
 
+        self.btn_rtu_ack = ctk.CTkButton(ctrl, text="ACK FAULT (RTU/PID)", fg_color=CLR_WARN_DEEP, hover_color=CLR_WARN_DEEP_HOVER,
+                                          command=lambda: self._rtu_send_cmd("ACK FAULT"))
+        self.btn_rtu_ack.grid(row=6, column=0, padx=15, pady=(2, 4), sticky="ew")
+
         sp = ctk.CTkFrame(ctrl, fg_color="transparent")
-        sp.grid(row=6, column=0, padx=15, pady=(4, 2), sticky="ew")
+        sp.grid(row=7, column=0, padx=15, pady=(4, 2), sticky="ew")
         sp.grid_columnconfigure((0, 1), weight=1)
         ctk.CTkLabel(sp, text="Setpoint (°C):").grid(row=0, column=0, columnspan=2, sticky="w")
-        ctk.CTkEntry(sp, textvariable=self.setpoint_val, width=70, justify="center").grid(row=1, column=0, padx=(0, 4), pady=(2, 0), sticky="ew")
+        entry_setpoint = ctk.CTkEntry(sp, textvariable=self.setpoint_val, width=70, justify="center")
+        entry_setpoint.grid(row=1, column=0, padx=(0, 4), pady=(2, 0), sticky="ew")
+        entry_setpoint.bind("<Return>", lambda e: self._rtu_set_setpoint())
         ctk.CTkButton(sp, text="Set", width=60, command=self._rtu_set_setpoint).grid(row=1, column=1, pady=(2, 0), sticky="ew")
 
     # ---------------------------------------------------------------- Colonna CENTRO
@@ -903,9 +913,11 @@ class AntiSELDashboard(ctk.CTk):
             self._log(f"RTU/PID -> {cmd}", "tx")
 
     def _rtu_set_setpoint(self):
+        raw = self.setpoint_val.get().strip().replace(",", ".")
         try:
-            sp = float(self.setpoint_val.get())
+            sp = float(raw)
         except ValueError:
+            self._log(f"RTU/PID: setpoint '{self.setpoint_val.get()}' non valido (usare un numero, es. 85.0).", "err")
             return
         self._rtu_send_cmd(f"SET SETPOINT_C {sp:.1f}")
 
