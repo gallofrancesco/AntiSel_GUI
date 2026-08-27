@@ -10,34 +10,48 @@ gira su questo MCU single-core.
 > sono incompatibili. Il driver firmware è `Core/Src/max31856.c` /
 > `Core/Inc/max31856.h`.
 >
-> ⚠️ **SPI3 rimappato su PC10/PC11/PC12**: la mappatura originale
-> (PB3/PB4/PB5) condivideva SCK/MISO con i pin JTAG (JTDO-TRACESWO,
-> NJTRST). In campo, `GET RAW` ha mostrato scritture di registro
+> ⚠️ **Storico SPI3/PC10-12 abbandonato**: la mappatura precedente
+> (SPI3 su PC10/PC11/PC12, connettore CN8) mostrava scritture di registro
 > "scivolate" su un indirizzo adiacente durante `MAX31856_Init()`
-> (es. il valore atteso in CR1 ritrovato in MASK) — sintomo di un
-> glitch elettrico/di timing sul bus SPI3. Spostato su PC10/PC11/PC12
-> (connettore ZIO **CN8**, non condivisi con nessuna altra funzione né
-> con pin storicamente JTAG) per eliminarlo alla radice. **Richiede
-> ricablaggio fisico** del modulo MAX31856 dal vecchio SPI3 su CN7 al
-> nuovo SPI3 su CN8. Il CS resta su PE4, connettore **CN9** (invariato
-> — corretto anche il riferimento errato a CN7 presente in una versione
-> precedente di questa tabella). Vedi anche il fix "read-back + retry" in
-> `MAX31856_Init()`, mantenuto come mitigazione software indipendente.
+> (es. il valore atteso in CR1 ritrovato in MASK), e diagnostica hardware
+> approfondita (comandi `GET RAW`/`GET GPIO`/`TEST SCK` aggiunti per il
+> bring-up) ha mostrato SCK fermo a livello alto invece che al riposo
+> basso atteso (CPOL=0) anche forzando il toggle via GPIO puro — sintomo
+> di un problema sul periferico/pin SPI3 stesso, non risolto dal
+> ricablaggio CN7→CN8. **Migrato a SPI1 sul connettore ZIO CN7**
+> (Table 18 del datasheet ufficiale, `docs/um2407-...pdf`), che espone
+> SCK/MISO/MOSI in modo nativo senza passare da AF alternativi condivisi
+> con JTAG o SDMMC. Il CS, inizialmente lasciato su PE4 (**CN9**, non CN7
+> — vedi nota precedente sulla correzione di questo riferimento), è stato
+> **spostato anch'esso su CN7** (PD14, pin `SPI_A_CS` nativo) dopo aver
+> misurato PE4 fermo a 0V esternamente nonostante il firmware lo leggesse
+> `HIGH` — vedi dettaglio nella tabella sotto. **Richiede ricablaggio
+> fisico** del modulo MAX31856 da CN8/CN9 interamente a CN7.
+>
+> ⚠️ **Conflitto risolto con Heater PWM**: MISO di SPI1 è **PA6**, lo
+> stesso pin fisico che era assegnato a `Heater PWM` (`TIM3_CH1`, CN7
+> `D12`). Il PWM del riscaldatore è stato spostato su **TIM4_CH4/PD15**
+> (anch'esso su CN7, `D9`) per liberare PA6.
+>
+> Vedi anche il fix "read-back + retry" in `MAX31856_Init()`, mantenuto
+> come mitigazione software indipendente.
+>
+> ⚠️ **Da aggiornare anche nel `.ioc`**: queste modifiche sono state
+> fatte a mano in `spi.c`/`tim.c`/`heater_ctrl.c`/`main.c`, fuori dai
+> blocchi `USER CODE`. Se in futuro si rigenera il codice da CubeMX senza
+> aver prima allineato il pinout nel `.ioc` (SPI1 su PA5/PA6/PB5, TIM4_CH4
+> su PD15), la rigenerazione sovrascrive questi file e si torna alla
+> vecchia mappatura SPI3/TIM3.
 
 ## Segnali applicativi
 
 | Segnale | Pin STM32 | Connettore | Periferica / config | Ruolo |
 |---|---|---|---|---|
-| MAX31856 CS | **PE4** | CN9 | GPIO output PP, riposo **HIGH** (attivo basso) | Chip select SPI del driver termocoppia. **Fix**: il livello di uscita iniziale nel `.ioc`/`gpio.c` era rimasto `GPIO_PIN_RESET` (LOW) dalla vecchia mappatura RTD, tenendo il CS asserito dal boot fino alla prima `cs_high()` in `MAX31856_Init()` — durante la finestra di `MX_LWIP_Init()` (autonegoziazione PHY, anche secondi). Corretto a `GPIO_PIN_SET` (HIGH) |
-| MAX31856 SCK | **PC10** | CN8 (pin 6, `D45`) | SPI3_SCK, AF6 | Rimappato da PB3 (JTDO/TRACESWO) — vedi nota sopra |
-| MAX31856 MISO | **PC11** | CN8 (pin 8, `D46`) | SPI3_MISO, AF6 | Rimappato da PB4 (NJTRST) — vedi nota sopra |
-| MAX31856 MOSI | **PC12** | CN8 (pin 10, `D47`) | SPI3_MOSI, AF6 | Rimappato da PB5. SPI3: 8 bit, mode 1 (CPOL=0/CPHA=1), prescaler /64 (3.125 MBit/s, da CubeMX). Sostituisce la precedente mappatura su SPI2 (PB10/PC2_C/PC3_C) per evitare i pin "_C" (switch analogico) e il LED LD3 (PB14) |
-| Heater PWM | **PA6** | CN7 (`D12`) | TIM3_CH1, AF2 | Pilota lo stadio di potenza (MOSFET/SSR — tipo ancora TBD, §7 proposta) verso le resistenze. Avviato in `Heater_Init()` (`HAL_TIM_PWM_Start`), duty scritto via `__HAL_TIM_SET_COMPARE` |
-
-> Nota: PC10/PC11/PC12 sul connettore CN8 sono etichettati `SDMMC_D2/D3/CK`
-> nel silkscreen ZIO del Nucleo (funzione alternativa non usata in questo
-> progetto) — è normale che appaiano con quel nome sulla serigrafia della
-> scheda pur essendo qui configurati come SPI3.
+| MAX31856 CS | **PD14** | CN7 (pin 16, `D10`) | GPIO output PP, riposo **HIGH** (attivo basso) | Chip select SPI del driver termocoppia. Spostato da PE4 (CN9 pin 16, poi da un tentativo intermedio su PE2/CN9 pin 14): PE4 misurava ripetutamente 0V esternamente nonostante il firmware leggesse `HIGH` via `GET GPIO`, con catena di misura validata (3V3 letto correttamente sullo stesso setup) — sospetta rottura del collegamento fisico su quella linea dopo il ricablaggio SPI1/CN7, non confermabile da remoto. **PD14 è il pin `SPI_A_CS` nativo di CN7** (Table 18 del datasheet) — non usato in hardware come NSS (CS resta gestito via software, `SPI_NSS_SOFT`), ma sceglierlo consolida tutti e 4 i segnali SPI (SCK/MISO/MOSI/CS) sullo stesso connettore, evitando salti tra CN7 e CN9. Nessun conflitto con TIM4_CH4 (PD15, Heater PWM): PD14 sarebbe TIM4_CH3, canale non usato. **Fix storico**: il livello di uscita iniziale nel `.ioc`/`gpio.c` era rimasto `GPIO_PIN_RESET` (LOW) dalla vecchia mappatura RTD, tenendo il CS asserito dal boot fino alla prima `cs_high()` in `MAX31856_Init()` — durante la finestra di `MX_LWIP_Init()` (autonegoziazione PHY, anche secondi). Corretto a `GPIO_PIN_SET` (HIGH) |
+| MAX31856 SCK | **PA5** | CN7 (pin 10, `D13`) | SPI1_SCK, AF5 | Migrato da PC10/SPI3 (CN8) — vedi nota sopra |
+| MAX31856 MISO | **PA6** | CN7 (pin 12, `D12`) | SPI1_MISO, AF5 | Migrato da PC11/SPI3. Libera PA6 dal precedente uso come Heater PWM (spostato su TIM4_CH4/PD15) |
+| MAX31856 MOSI | **PB5** | CN7 (pin 14, `D11`) | SPI1_MOSI, AF5 | Migrato da PC12/SPI3. SPI1: 8 bit, mode 1 (CPOL=0/CPHA=1), prescaler /64, stesso clock kernel SPI123 via PLL già usato per SPI3 |
+| Heater PWM | **PD15** | CN7 (pin 18, `D9`) | TIM4_CH4, AF2 | Pilota lo stadio di potenza (MOSFET/SSR — tipo ancora TBD, §7 proposta) verso le resistenze. Avviato in `Heater_Init()` (`HAL_TIM_PWM_Start`), duty scritto via `__HAL_TIM_SET_COMPARE`. Spostato da PA6/TIM3_CH1 per il conflitto con SPI1_MISO |
 
 ## Rete
 
