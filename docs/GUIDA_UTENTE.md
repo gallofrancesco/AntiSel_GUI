@@ -165,37 +165,29 @@ l'acquisizione per ottenere nomi file riconoscibili.
   (`TRACE_START`…`TRACE_END`) con overlay sul grafico continuo nel punto
   temporale corretto. La navigazione libera è bloccata su questo grafico per non perderne l'inquadratura.
 
-### 4.10 Pannello PID CTRL / RTU (placeholder)
+### 4.10 Pannello PID CTRL / RTU (HeatSystem dedicato)
 
-La descrizione di sistema (Figura 1) prevede, oltre alla AntiSEL Board, un
+La descrizione di sistema (Figura 1) prevede, oltre alla AntiSEL Board principale, un
 **PID CTRL** che pilota il PWM dell'Heat System della Irradiation Board e un
-**RTU** che legge la temperatura del DUT e la fornisce a PID e PC. Questi due
-dispositivi non sono ancora disponibili in laboratorio (IP, porta e
-protocollo sono un punto aperto, §8.4 della descrizione di sistema): il
-pannello nella colonna destra è quindi un **placeholder**, pronto per essere
-agganciato quando l'hardware sarà definito.
+**RTU** che legge la temperatura del DUT e la fornisce a PID e PC. 
+Questa architettura è implementata su una **seconda scheda dedicata (NUCLEO-H753ZI)** 
+che funge da termoregolatore indipendente, dotata di interfaccia sensore MAX31856 nativa.
 
 - **IP / Porta**: indirizzo TCP del link RTU/PID, indipendente da quello
-  della Nucleo (default `192.168.1.101:7756`, costanti `RTU_HOST`/`RTU_PORT`
+  della Nucleo principale (default `192.168.1.101:7756`, costanti `RTU_HOST`/`RTU_PORT`
   in cima a `nucleo_client.py`).
 - **Connetti/Disconnetti**: apre/chiude una connessione TCP separata da
-  quella della Nucleo (thread RX dedicato, non interferisce col resto della
+  quella della Nucleo principale (thread RX dedicato, non interferisce col resto della
   dashboard).
 - **T_DUT / PWM PID / Stato PID**: aggiornati automaticamente una volta al
-  secondo tramite un polling `GET TEMP` / `GET PID` (protocollo testuale
-  provvisorio, in stile `GET`/`SET`/`OK` coerente con quello della Nucleo).
+  secondo tramite un polling `GET TEMP` / `GET PID`.
 - **Setpoint**: campo in °C (default 85.0, in linea con `T_DUT` richiesto da
   AD2 §3); **Set setpoint** invia `SET SETPOINT_C <valore>`.
 
-Quando le specifiche reali di PID CTRL e RTU saranno disponibili (protocollo
-testuale, Modbus TCP o altro), è sufficiente aggiornare `RtuClient` in
-`nucleo_client.py` (e il parsing dei campi in `_poll_rtu_queue` lato GUI)
-senza modificare il resto della dashboard.
-
-La logica di controllo raccomandata per il PID CTRL reale (anti-windup,
-frequenza di aggiornamento, guadagni) è descritta in
-[AntiSEL_Protocollo_Comandi.md](AntiSEL_Protocollo_Comandi.md#logica-di-controllo-raccomandata-per-il-pid-ctrl),
-con implementazione di riferimento in [`pid_controller.py`](../pid_controller.py).
+Il firmware del termoregolatore implementa le routine di sicurezza locale 
+(spegnimento in caso di sensore rotto o disconnesso) e l'algoritmo PID Anti-windup,
+sgravando il PC da ogni vincolo real-time termico. Per ulteriori dettagli tecnici sul protocollo, vedi
+[AntiSEL_Protocollo_Comandi.md](AntiSEL_Protocollo_Comandi.md#6bis-link-pid-ctrl--rtu-heatsystem-dedicato).
 
 ### 4.11 Grafico temperatura
 

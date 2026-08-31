@@ -1002,32 +1002,8 @@ class AntiSELDashboard(ctk.CTk):
             while True:
                 kind, msg = self.client.rx_queue.get_nowait()
                 if kind == "rx":
-                    _all_fields = parse_kv(msg)
-                    if "TEMP" in _all_fields:
-                        try:
-                            temp = float(_all_fields["TEMP"].replace(",", "."))
-                            self.metric_temp.configure(text=f"{temp:.1f}")
-                            now = time.time()
-                            if self.rtu_t0 is None:
-                                self.rtu_t0 = now
-                            try:
-                                sp = float(self.setpoint_val.get().replace(",", "."))
-                            except ValueError:
-                                sp = float("nan")
-                            self.rtu_t.append(now - self.rtu_t0)
-                            self.rtu_temp.append(temp)
-                            self.rtu_sp.append(sp)
-                            self._plot_dirty = True
-                        except ValueError:
-                            pass
-                    if "PWM" in _all_fields:
-                        try:
-                            self.metric_pwm.configure(text=f"{float(_all_fields['PWM'].replace(',', '.')):.1f}")
-                        except ValueError:
-                            pass
-
                     if msg.startswith("LOG_10HZ"):
-                        fields = _all_fields
+                        fields = parse_kv(msg)
                         try:
                             st = int(fields.get("STATE", -1))
                             ret = int(fields["RETRY"]) if "RETRY" in fields else None
